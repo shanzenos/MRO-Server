@@ -5,7 +5,7 @@ Created from Ennuo's original MRO Server Prototype: https://github.com/ennuo/eks
 
 (Huge thanks to Ennuo for laying the groundwork on all this, and continuing to contribute)
 
-This server emulator aims to restore online functionality for the 2009 online mech shooter Metal Rage Online.
+This server emulator aims to restore online functionality for the 2009 online mech shooter Metal Rage Online, created by GameHI.
 
 It is very WIP, currently only supporting basic functionality. 
 
