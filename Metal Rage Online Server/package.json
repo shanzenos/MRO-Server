@@ -1,0 +1,14 @@
+{
+  "name": "metalrage-server-emu",
+  "version": "0.1.0",
+  "description": "Metal Rage Online server emulator",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "http": "node server.launcher.js"
+  },
+  "dependencies": {
+    "express": "^4.18.0",
+    "mysql2": "^3.20.0"
+  }
+}
