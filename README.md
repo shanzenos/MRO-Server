@@ -1,9 +1,12 @@
+# MRO Server
 This is a server emulator for the game Metal Rage Online, written in nodeJS.
+
 Created from Ennuo's original MRO Server Prototype: https://github.com/ennuo/eks/tree/main/servers/metalrage
 
 (Huge thanks to Ennuo for laying the groundwork on all this, and continuing to contribute)
 
 This server emulator aims to restore online functionality for the 2009 online mech shooter Metal Rage Online.
+
 It is very WIP, currently only supporting basic functionality. 
 
 Documentation will be posted soon, and will be linked here.
