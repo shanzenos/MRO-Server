@@ -137,13 +137,12 @@ class ZLobbyDispatch
             default:
             {
                 //Generic OK Response to keep client from crashing / hanging
-                    const responseType = type + 1;
-                    console.log(`[ZLobbyDispatch] >> Auto-responding with 0x${responseType.toString(16).padStart(8, '0')}`);
-                    const [msg, respBody] = client.getMessageBuffer(responseType, 0x6);
-                    respBody.writeUint16LE(0x0000, 0);
-                    respBody.writeUint32LE(0x0000, 2);
-                    client.send(msg);
-                }
+                const responseType = type + 1;
+                console.log(`[ZLobbyDispatch] >> Auto-responding with 0x${responseType.toString(16).padStart(8, '0')}`);
+                const [msg, respBody] = client.getMessageBuffer(responseType, 0x6);
+                respBody.writeUint16LE(0x0000, 0);
+                respBody.writeUint32LE(0x0000, 2);
+                client.send(msg);
                 return true;
             }
         }
