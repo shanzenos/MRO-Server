@@ -10,8 +10,8 @@ This server emulator aims to restore online functionality for the 2009 online me
 It is very WIP, currently only supporting basic functionality. 
 
 Server uses the following ports:
-9211 - Auth/Dispatch
-30907 - Game Server
+* 9211 - Auth/Dispatch
+* 30907 - Game Server
 
 Requirements: 
 * [MySQL](https://www.mysql.com/)
