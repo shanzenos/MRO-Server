@@ -11,7 +11,7 @@ It is very WIP, currently only supporting basic functionality.
 
 Requirements: 
 * [MySQL](https://www.mysql.com/)
-* [NodeJS](https://www.mysql.com/](https://nodejs.org/en)
+* [NodeJS](https://nodejs.org/en)
 * [Game Client](https://archive.org/download/metal-rage-online-client/MetalRage%20Online/MetalRage%20Online.rar)
 
 Additioanlly, a fix for the game to run on windows 11 onward can be found [here](https://github.com/shanzenos/Metal-Rage-Online-Win11-Fix)
