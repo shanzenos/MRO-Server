@@ -9,9 +9,9 @@ This server emulator aims to restore online functionality for the 2009 online me
 
 It is very WIP, currently only supporting basic functionality. 
 
-Documentation will be posted soon, and will be linked here.
+Requirements: 
+* [MySQL](https://www.mysql.com/)
+* [Game Client](https://archive.org/download/metal-rage-online-client/MetalRage%20Online/MetalRage%20Online.rar)
 
-The game client is avaliable [here](https://archive.org/download/metal-rage-online-client/MetalRage%20Online/MetalRage%20Online.rar)
-
-Additioanlly, a DLL fix for the game to run on windows 11 onward can be found [here](https://github.com/shanzenos/Metal-Rage-Online-Win11-Fix)
+Additioanlly, a fix for the game to run on windows 11 onward can be found [here](https://github.com/shanzenos/Metal-Rage-Online-Win11-Fix)
 
