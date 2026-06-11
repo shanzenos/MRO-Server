@@ -158,7 +158,13 @@ CREATE TABLE item_catalog (
     item_id         INT UNSIGNED    PRIMARY KEY,
     code            VARCHAR(10)     NOT NULL,
     name            VARCHAR(50)     NOT NULL DEFAULT '',
-    category        VARCHAR(20)     NOT NULL DEFAULT ''
+    category        VARCHAR(20)     NOT NULL DEFAULT '',
+    discount_price  INT             NOT NULL DEFAULT 1000,
+    price           INT             NOT NULL DEFAULT 1000,
+    is_show         TINYINT         NOT NULL DEFAULT 1,
+    is_new          TINYINT         NOT NULL DEFAULT 0,
+    is_hot          TINYINT         NOT NULL DEFAULT 0,
+    category_type   INT             NOT NULL DEFAULT 0
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 INSERT INTO item_catalog (item_id, code, name, category) VALUES
