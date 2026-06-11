@@ -30,16 +30,70 @@ class ZGameDispatch
             console.log(`[ZGameDispatch] Body:`, body.toString('hex'));
         }
 
-        // Auto-respond to CQ messages
-        if (type % 2 === 1) {
-            const responseType = type + 1;
-            console.log(`[ZGameDispatch] >> Auto-responding with 0x${responseType.toString(16).padStart(8, '0')}`);
-            const [msg, respBody] = client.getMessageBuffer(responseType, 0x6);
-            respBody.writeUint16LE(0x0000, 0);
-            respBody.writeUint32LE(0x0000, 2);
-            client.send(msg);
-        }
+        switch (type) {
 
-        return true;
+            // 0x00250102 = 게임 씬 진입 알림
+            // - 게임 시작 전(채널/창고): 무시 (Ready_Host_SQ를 보내면 BeginRound가 너무 일찍 발생)
+            // - 게임 시작 후(훈련장 씬 로드): Ready_Host_SQ 전송
+            case 0x00250102:
+                if (client.gameStarted_) {
+                    console.log(`[ZGameDispatch] >> 게임 씬 진입 알림 (0x00250102) — Ready_Host_SQ 전송`);
+                    const [msg, respBody] = client.getMessageBuffer(0x00250203, 0x6);
+                    respBody.writeUint16LE(0x0000, 0);
+                    respBody.writeUint32LE(0x0000, 2);
+                    client.send(msg);
+                } else {
+                    // Lobby/hangar state: ACK with 0x00250103 so client doesn't stall
+                    console.log(`[ZGameDispatch] >> 초기화 CN (0x00250102) — ACK (로비 상태)`);
+                    const [msg, respBody] = client.getMessageBuffer(0x00250103, 0x6);
+                    respBody.writeUint16LE(0x0000, 0);
+                    respBody.writeUint32LE(0x0000, 2);
+                    client.send(msg);
+                }
+                return true;
+
+            // 0x00250204 = Ready_Host_CA — 클라이언트가 준비 확인에 응답
+            case 0x00250204:
+            {
+                console.log(`[ZGameDispatch] >> Ready_Host_CA (0x00250204) body: ${body.toString('hex')}`);
+
+                // Ready_Success_SN (0x00250201) — 준비 완료
+                {
+                    const [msg, respBody] = client.getMessageBuffer(0x00250201, 0x6);
+                    respBody.writeUint16LE(0x0000, 0);
+                    respBody.writeUint32LE(0x0000, 2);
+                    client.send(msg);
+                    console.log(`[ZGameDispatch] >> Sent 0x00250201 (Ready_Success_SN)`);
+                }
+
+                // BeginRound_SN (0x00250301) — 라운드 시작
+                setTimeout(() => {
+                    const [msg, respBody] = client.getMessageBuffer(0x00250301, 0x6);
+                    respBody.writeUint16LE(0x0000, 0);
+                    respBody.writeUint32LE(0x0000, 2);
+                    client.send(msg);
+                    console.log(`[ZGameDispatch] >> Sent 0x00250301 (BeginRound_SN)`);
+                }, 500);
+                return true;
+            }
+
+            // 0x00250202 = Ready_Host_SN — 다른 플레이어 준비 알림 (멀티 전용, 무시)
+            case 0x00250202:
+                return true;
+
+            default:
+            {
+                // Auto-respond to odd (CQ) messages
+                if (type % 2 === 1) {
+                    const responseType = type + 1;
+                    console.log(`[ZGameDispatch] >> Auto-responding with 0x${responseType.toString(16).padStart(8, '0')}`);
+                    const [msg, respBody] = client.getMessageBuffer(responseType, 0x6);
+                    respBody.writeUint16LE(0x0000, 0);
+                    respBody.writeUint32LE(0x0000, 2);
+                    client.send(msg);
+                }
+                return true;
+            }
+        }
     }
 };

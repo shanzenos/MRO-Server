@@ -2,7 +2,7 @@ const mysql = require('mysql2/promise');
 const path = require('path');
 
 // Load DB config from config.json (editable per-machine)
-let dbConfig = { host: '127.0.0.1', port: 3306, user: 'root', password: '', database: 'mro' };
+let dbConfig = { host: '127.0.0.1', port: 3306, user: 'root', password: 'root', database: 'mro' };
 try {
     const loaded = require('./config.json');
     dbConfig = { ...dbConfig, ...loaded };
@@ -136,7 +136,7 @@ async function createAccount(username, nickname, pilot)
         await conn.beginTransaction();
 
         const [result] = await conn.execute(
-            'INSERT INTO accounts (username, nickname, pilot) VALUES (?, ?, ?)',
+            'INSERT INTO accounts (username, nickname, pilot, account_level) VALUES (?, ?, ?, 4)',
             [username, nickname, pilot]
         );
         const accountId = result.insertId;
@@ -154,7 +154,7 @@ async function createAccount(username, nickname, pilot)
             );
         }
 
-        // Give all 8 mech licenses (purchased)
+        // Give all 8 mech licenses (license_type=0 = permanent/purchased)
         for (let i = 0; i < 8; i++) {
             await conn.execute(
                 'INSERT INTO mech_licenses (account_id, slot, mech_type, license_type) VALUES (?, ?, ?, 1)',
@@ -188,6 +188,16 @@ async function createAccount(username, nickname, pilot)
         // Mech types: 1=Light(SA), 2=Assault(AA), 3=Medium(HA), 4=Sniper(NB),
         //   5=Firepower(TB), 6=Engineer(BB), 7=Maintenance(EA), 8=Observation(OA)
         const starterLoadouts = [
+             // 기체 바디 (part_slot=0, slot=0)
+            [1, 0, 11200101],  // 소형
+            [2, 0, 12200101],  // 강습
+            [3, 0, 13200101],  // 중형
+            [4, 0, 14300101],  // 저격
+            [5, 0, 15300101],  // 화력
+            [6, 0, 16300101],  // 공병
+            [7, 0, 17200101],  // 정비
+            [8, 0, 18200101],  // 관측
+
             // [mech_type, part_slot, item_id]
             // Mech 1 - Light
             [1, 1, 21100101],  // MOC_a Smoothbore gun
@@ -264,6 +274,26 @@ async function updateLastLogin(accountId)
     );
 }
 
+async function getItemCatalog()
+{
+    const [rows] = await pool.execute(
+        `SELECT
+            c.item_id,
+            c.category_type,
+            c.mech_type,
+            COALESCE(NULLIF(ic.price, 0), NULLIF(c.price, 0), 1000) AS price,
+            COALESCE(NULLIF(ic.discount_price, 0), NULLIF(ic.price, 0), NULLIF(c.price, 0), 1000) AS discount_price,
+            COALESCE(ic.is_show, 1) AS is_show,
+            COALESCE(ic.is_new, 0) AS is_new,
+            COALESCE(ic.is_hot, 0) AS is_hot,
+            COALESCE(ic.category, '') AS category
+         FROM catalog c
+         LEFT JOIN item_catalog ic ON ic.item_id = c.item_id
+         ORDER BY c.item_id`
+    );
+    return rows;
+}
+
 module.exports = {
     pool,
     getAccountByUsername,
@@ -274,6 +304,7 @@ module.exports = {
     getMaps,
     getTutorials,
     getItems,
+    getItemCatalog,
     createAccount,
     completeTutorial,
     updateLastLogin,

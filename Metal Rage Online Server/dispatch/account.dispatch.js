@@ -5,21 +5,27 @@ const db = require('../database/db');
 const CQ_LOGIN_WASABII = 0x00110151;
 const CQ_CREATE = 0x210201;
 
+// Tutorial completion request from client (opcode candidates — log confirms which one fires)
+const CQ_COMPLETE_A = 0x210122;
+const CQ_COMPLETE_B = 0x210131;
+const CQ_COMPLETE_C = 0x210132;
+const CQ_COMPLETE_D = 0x210141;
+
 const SA_LOGIN_WASABII = 0x00110152;
 const SA_CREATE = 0x210202;
 
 const SN_WAIT = 0x110131;
 const SN_MAP_INFO = 0x210115;
 const SN_LICENSE_INFO = 0x260101;
+const SN_GRADE_INFO = 0x00510101;   // ZDispatchCommunity::Grade_Info_SN → calls Account_Grade_Set → sets nMedalLevel
 
 const SN_DEFAULT_INFO = 0x210101;
 const SN_PLAY_INFO = 0x210102;
 const SN_RECORD_INFO = 0x210103;
 const SN_MECH_LEVEL = 0x210104;
-const SN_RANK = 0x210105;
 const SN_ITEM_INFO = 0x210111;
-const SN_WEAR_INFO = 0x210112;    // Was mislabeled as SN_EXPIRATION_ITEM — this is WearInfo_SN!
-const SN_EXPIRATION_ITEM = 0x210113;  // Actual ExpirationItem is the next ID
+const SN_WEAR_INFO = 0x210113;         // DLL: WearInfo_SN
+const SN_EXPIRATION_ITEM = 0x210112;   // DLL: ExpirationItem_SN
 const SN_COMPLETE = 0x210121;
 
 
@@ -32,6 +38,17 @@ const SN_CHANNEL_ADD = 0x220102;
 const SA_LEAVE = 0x220132;
 
 const ACCOUNT_LEVEL_STR = { 1: '1\0', 2: '2\0', 3: '3\0', 4: '4\0' };
+const BODY_CACHE_INDEX_BY_ITEM_ID = {
+    11100101: 84,
+    12100101: 97,
+    13100101: 110,
+    14200101: 123,
+    14300101: 130,
+    15200101: 136,
+    16200101: 149,
+    17100101: 162,
+    18100101: 175,
+};
 
 module.exports =
 class ZAccountDispatch
@@ -48,7 +65,33 @@ class ZAccountDispatch
                 this.handleLogin(client, body);
                 return true;
 
+            case CQ_COMPLETE_A:
+            case CQ_COMPLETE_B:
+            case CQ_COMPLETE_C:
+            case CQ_COMPLETE_D:
+                this.handleTutorialComplete(client, body, type);
+                return true;
+
             default: return false;
+        }
+    }
+
+    /**
+     * Handle tutorial completion packet from client.
+     * Saves the completed tutorial to DB and refreshes SN_COMPLETE.
+     */
+    async handleTutorialComplete(client, body, opcode)
+    {
+        try {
+            const tutorialId = body.length >= 1 ? body.readUint8(0) : 0;
+            console.log(`[ZDispatchAccount::CQ_COMPLETE] opcode=0x${opcode.toString(16)} tutorialId=${tutorialId} body=${body.toString('hex')}`);
+
+            if (client.accountId_ && tutorialId >= 1 && tutorialId <= 4) {
+                await db.completeTutorial(client.accountId_, tutorialId);
+                console.log(`[ZDispatchAccount::CQ_COMPLETE] Tutorial ${tutorialId} marked complete for account #${client.accountId_}`);
+            }
+        } catch (err) {
+            console.error(`[ZDispatchAccount::CQ_COMPLETE] Error:`, err.message);
         }
     }
 
@@ -200,6 +243,12 @@ class ZAccountDispatch
                     client.send(msg);
                 }
 
+                {
+                    const [msg, respBody] = client.getMessageBuffer(SN_GRADE_INFO, 4);
+                    respBody.writeUInt32LE(11, 0);
+                    client.send(msg);
+                }
+
                 // SN_MECH_LEVEL (all mechs level 1)
                 {
                     const MAX_NUM_MECHS = 8;
@@ -233,8 +282,9 @@ class ZAccountDispatch
                     respBody[offset++] = 0x00;
                     respBody[offset++] = MAX_SLOT_COUNT;
                     for (let i = 0; i < MAX_SLOT_COUNT; ++i, offset += 9) {
-                        respBody.writeUint32LE(i + 1, offset);
-                        respBody.writeUint32LE(1, offset + 5);
+                        respBody.writeUint32LE(i + 1, offset);           // 0-3: mech_type
+                        respBody.writeUint32LE(0xFFFFFFFF, offset + 4);  // 4-7: expiry = permanent
+                        respBody.writeUint8(1, offset + 8);              // 8:   license_type = 1
                     }
                     client.send(msg);
                 }
@@ -314,6 +364,12 @@ class ZAccountDispatch
                     client.send(msg);
                 }
 
+                {
+                    const [msg, respBody] = client.getMessageBuffer(SN_GRADE_INFO, 4);
+                    respBody.writeUInt32LE(11, 0);
+                    client.send(msg);
+                }
+
                 // SN_MECH_LEVEL
                 {
                     const MAX_NUM_MECHS = 8;
@@ -347,8 +403,9 @@ class ZAccountDispatch
                     respBody[offset++] = 0x00;
                     respBody[offset++] = MAX_SLOT_COUNT;
                     for (let i = 0; i < MAX_SLOT_COUNT; ++i, offset += 9) {
-                        respBody.writeUint32LE(i + 1, offset);
-                        respBody.writeUint32LE(1, offset + 5);
+                        respBody.writeUint32LE(i + 1, offset);           // 0-3: mech_type
+                        respBody.writeUint32LE(0xFFFFFFFF, offset + 4);  // 4-7: expiry = permanent
+                        respBody.writeUint8(1, offset + 8);              // 8:   license_type = 1
                     }
                     client.send(msg);
                 }
@@ -387,13 +444,16 @@ class ZAccountDispatch
         const accountId = account.id;
         client.accountId_ = accountId;
         client.nickname_ = account.nickname;
+        client.pilot_ = Number(account.pilot) || 101;
 
         // Load all data from DB in parallel
-        const [record, mechLevels, licenses, maps] = await Promise.all([
+        const [record, mechLevels, licenses, maps, tutorials, items] = await Promise.all([
             db.getRecord(accountId),
             db.getMechLevels(accountId),
             db.getMechLicenses(accountId),
             db.getMaps(accountId),
+            db.getTutorials(accountId),
+            db.getItems(accountId),
         ]);
 
         // SN_DEFAULT_INFO
@@ -431,26 +491,42 @@ class ZAccountDispatch
         }
 
         // SN_RECORD_INFO
+        // DLL RecordInfo_SN reads: body[0x00]=Level, then various offsets up to 0x54
+        // printf: Level:%d, LevelExp:%I64d, CardExp:%I64d, Win:%d, Draw:%d, Lose:%d, Kill:%d, Death:%d, Point:%I64d, Coupon:%I64d
         if (record) {
             const [msg, body] = client.getMessageBuffer(SN_RECORD_INFO, 0x60);
-            body.writeUint32LE(record.level, 0);
-            body.writeBigUint64LE(BigInt(record.exp), 4);
-            body.writeBigUint64LE(BigInt(record.exp_max), 12);
-            body.writeUint32LE(record.wins, 20);
-            body.writeUint32LE(record.losses, 24);
-            body.writeUint32LE(record.draws, 28);
-            body.writeUint32LE(record.kills, 32);
-            body.writeUint32LE(record.deaths, 36);
+            body.writeUint32LE(record.level, 0x00);
+            // Fill each u32 slot with unique marker to map fields
+            for (let i = 0x04; i < 0x60; i += 4) body.writeUint32LE(0, i);
+            body.writeUint32LE(record.wins, 0x14);
+            body.writeUint32LE(record.draws, 0x18);
+            body.writeUint32LE(record.losses, 0x1C);
+            body.writeUint32LE(record.kills, 0x20);
+            body.writeUint32LE(record.deaths, 0x24);
+            body.writeBigUint64LE(BigInt(record.exp), 0x40);
+            body.writeBigUint64LE(BigInt(record.exp_max), 0x48);
             client.send(msg);
         }
 
-        // SN_MECH_LEVEL
+        // SN_GRADE_INFO — ZDispatchCommunity::Grade_Info_SN calls Account_Grade_Set(grade).
+        // Account_Grade_Set sets nMedalLevel (offset 0x448) in ZNetwork_DJ.
+        // Without this, nMedalLevel stays at default 255 → szMedalLevel[255] OOB crash.
+        // Grade_Info_SN reads u32 at body[0], subtracts 11, switch(0..3) → grade 1-4.
+        // value 11 → grade 1 (lowest valid tier).
+        {
+            const [msg, body] = client.getMessageBuffer(SN_GRADE_INFO, 4);
+            body.writeUInt32LE(11, 0);
+            client.send(msg);
+            console.log(`[ZDispatchAccount] >> Sent SN_GRADE_INFO: value=11 (grade=1)`);
+        }
+
+        // SN_MECH_LEVEL — DLL reads u8 count (NOT u16), then 28-byte entries
+        // Entry: [u32 mechType][u32 level][i64 exp][u32 kills][u32 deaths][u32 sorties]
         if (mechLevels.length > 0) {
             const MECH_RECORD_SIZE = 0x1c;
-            const [msg, body] = client.getMessageBuffer(SN_MECH_LEVEL, 0x2 + (MECH_RECORD_SIZE * mechLevels.length));
-            let offset = 0;
-
-            body.writeUint16LE(mechLevels.length, 0);
+            const [msg, body] = client.getMessageBuffer(SN_MECH_LEVEL, 1 + (MECH_RECORD_SIZE * mechLevels.length));
+            body.writeUint8(mechLevels.length, 0);
+            let offset = 1;
             for (const mech of mechLevels) {
                 body.writeUint32LE(mech.mech_type, offset);
                 body.writeUint32LE(mech.level, offset + 4);
@@ -461,11 +537,12 @@ class ZAccountDispatch
                 offset += MECH_RECORD_SIZE;
             }
             client.send(msg);
+            console.log(`[ZDispatchAccount] >> Sent SN_MECH_LEVEL: ${mechLevels.length} mechs`);
         }
 
         // SN_MAP_INFO
         {
-            const mapCount = maps.length || MAX_MAP_COUNT;
+            const mapCount = maps.length;  // || MAX_MAP_COUNT 제거
             const [msg, body] = client.getMessageBuffer(SN_MAP_INFO, 0x2 + (4 * mapCount));
             let offset = 0;
             body[offset++] = 0x00;
@@ -477,7 +554,8 @@ class ZAccountDispatch
             client.send(msg);
         }
 
-        // SN_LICENSE_INFO
+        // SN_LICENSE_INFO — DLL reads 9-byte entries as [u32 mechType][u8 pad][u32 type]
+        // DLL switch: type==1 → permanent(2), type==2 → timed(1), else → none(0)
         if (licenses.length > 0) {
             const [msg, body] = client.getMessageBuffer(SN_LICENSE_INFO, 0x2 + (9 * licenses.length));
             let offset = 0;
@@ -485,10 +563,12 @@ class ZAccountDispatch
             body[offset++] = licenses.length;
             for (const lic of licenses) {
                 body.writeUint32LE(lic.mech_type, offset);
-                body.writeUint32LE(lic.license_type, offset + 5);
+                body.writeUint8(0, offset + 4);
+                body.writeUint32LE(lic.license_type || 1, offset + 5);
                 offset += 9;
             }
             client.send(msg);
+            console.log(`[ZDispatchAccount] >> Sent SN_LICENSE_INFO: ${licenses.length} licenses (type=${licenses[0].license_type||1})`);
         }
 
         // SN_ITEM_INFO — Equipment/inventory data.
@@ -512,96 +592,90 @@ class ZAccountDispatch
         //   u32 Field_1F
         //
         // Debug string confirms: "UniqueKey : %d, ItemIndex : %d"
+        // Body rows (part_slot=0) still disconnect in ItemInfo_SN/Item_Add.
+        // Keep ItemInfo to equipment rows only and solve body Slot_Info separately.
         {
-            const items = await db.getItems(accountId);
+            const itemInfoItems = items.filter(item => Number(item.part_slot) !== 0);
             const ITEM_RECORD_SIZE = 35;
             const headerSize = 6; // u8 + u8 + u32
-            const [msg, body] = client.getMessageBuffer(SN_ITEM_INFO, headerSize + (ITEM_RECORD_SIZE * items.length));
+            const [msg, body] = client.getMessageBuffer(SN_ITEM_INFO, headerSize + (ITEM_RECORD_SIZE * itemInfoItems.length));
 
-            body.writeUint8(1, 0);                        // SuccessFlag = 1 (valid)
-            body.writeUint8(items.length, 1);              // ItemCount
-            body.writeUint32LE(accountId || 0, 2);         // AccountKey
+            body.writeUint8(1, 0);
+            body.writeUint8(itemInfoItems.length, 1);
+            body.writeUint32LE(accountId || 0, 2);
 
             let offset = headerSize;
-            for (const item of items) {
-                body.writeUint32LE(item.id || 0, offset);           // UniqueKey (DB auto-increment ID)
-                body.writeUint32LE(item.item_id, offset + 0x04);    // ItemIndex (item type code)
-                body.writeUint32LE(item.equipped ? 1 : 0, offset + 0x08); // EquipStatus
-                body.writeUint32LE(0, offset + 0x0C);               // padding
-                body.writeUint16LE(item.mech_type || 0, offset + 0x10);  // Field_10 (mech type?)
-                body.writeUint32LE(item.part_slot || 0, offset + 0x12);  // Field_12 (part slot?)
-                body.writeUint8(item.equipped ? 2 : 0, offset + 0x16); // Field_16 (use type: 2=equipment)
-                body.writeUint32LE(item.quantity || 1, offset + 0x17);   // Field_17 (quantity)
-                body.writeUint32LE(0xFFFFFFFF, offset + 0x1B);      // Field_1B (expiration — 0xFFFFFFFF = permanent)
-                body.writeUint32LE(0xFFFFFFFF, offset + 0x1F);      // Field_1F (expiration2 — 0xFFFFFFFF = permanent)
+            for (const item of itemInfoItems) {
+                body.writeUint32LE(item.id || 0, offset);
+                body.writeUint32LE(item.item_id, offset + 0x04);
+                body.writeUint32LE(item.equipped ? 1 : 0, offset + 0x08);
+                body.writeUint32LE(0, offset + 0x0C);
+                body.writeUint16LE(item.mech_type || 0, offset + 0x10);
+                body.writeUint32LE(item.part_slot || 0, offset + 0x12);
+                body.writeUint8(item.equipped ? 2 : 0, offset + 0x16);
+                body.writeUint32LE(item.quantity || 1, offset + 0x17);
+                body.writeUint32LE(0xFFFFFFFF, offset + 0x1B);
+                body.writeUint32LE(0xFFFFFFFF, offset + 0x1F);
                 offset += ITEM_RECORD_SIZE;
             }
             client.send(msg);
+            console.log(`[ZDispatchAccount] >> Sent SN_ITEM_INFO: ${itemInfoItems.length} items (equipment only)`);
         }
 
-        // SN_WEAR_INFO — Equipment loadout per mech.
-        // ZNetwork.dll (ZDispatchAccount::WearInfo_SN):
-        //
-        // Header (14 bytes):
-        //   u8   SuccessFlag
-        //   u8   EntryCount (N — one per mech type)
-        //   u32  AccountKey
-        //   u32  Unknown (init value, 0 is safe)
-        //   u32  DefaultMechType (1-8, sets active mech)
-        //
-        // Per-mech entry (52 bytes each):
-        //   u32  MechType (1-8)
-        //   For each of 6 part slots (Body, Primary, SubL, SubR, Booster, Equipment):
-        //     u32  UniqueKey (item instance ID)
-        //     u32  ItemIndex (item type code, used by EquipPart)
+        // SN_WEAR_INFO (0x210113) — DLL: WearInfo_SN
+        // Header: [u8 success][u8 count][u32 pilotSerialIndex][u32 pilotItemIndex][u32 selectedMechType]
+        // Entry (52 bytes): [u32 mechType] + 6x[u32 serialIndex, u32 itemIndex]
+        // Slot 0=Mech(body/chassis), 1=MainWeapon, 2=LeftWeapon, 3=RightWeapon, 4=Equipment, 5=Skin
         {
-            const items = await db.getItems(accountId);
-            const ENTRY_SIZE = 52;  // 4 + 6 * (4 + 4)
+            const ENTRY_SIZE = 52;
             const HEADER_SIZE = 14;
-            const defaultMech = 1;  // DefaultMechType (1-8), NOT pilot skin ID
+            const defaultMech = 1;
 
-            //Build mech equipment map from itemID's
-            const mechSlots = {};  // mechType -> [6 pairs of {uniqueKey, itemIndex}]
+            const mechSlots = {};
             for (let m = 1; m <= MAX_MECH_COUNT; m++) {
                 mechSlots[m] = Array.from({length: 6}, () => ({uniqueKey: 0, itemIndex: 0}));
             }
 
+            // All items: part_slot 0 = body/chassis → slot 0; 1-5 → slots 1-5
             for (const item of items) {
                 if (item.equipped && item.mech_type >= 1 && item.mech_type <= MAX_MECH_COUNT) {
-                    const slot = item.part_slot;
+                    const slot = Number(item.part_slot);
                     if (slot >= 0 && slot < 6 && mechSlots[item.mech_type]) {
+                        const rawId = Number(item.item_id) || 0;
+                        // body 슬롯(slot=0)은 Cache.Bin 인덱스로 변환
+                        const BODY_IDX = {
+                            11100101:84, 12100101:97, 13100101:110,
+                            14200101:123, 14300101:130, 15200101:136,
+                            16200101:149, 17100101:162, 18100101:175,
+                        };
+                        const itemIndex = (slot === 0 && BODY_IDX[rawId] != null)
+                            ? BODY_IDX[rawId] : rawId;
                         mechSlots[item.mech_type][slot] = {
                             uniqueKey: item.id || 0,
-                            itemIndex: item.item_id || 0,
+                            itemIndex: itemIndex,
                         };
                     }
                 }
             }
 
-            //Count how many mechs have any equipped items
             const mechEntries = [];
             for (let m = 1; m <= MAX_MECH_COUNT; m++) {
-                const slots = mechSlots[m];
-                if (slots.some(s => s.itemIndex !== 0)) {
-                    mechEntries.push({mechType: m, slots});
-                }
+                mechEntries.push({mechType: m, slots: mechSlots[m]});
             }
 
-            if (mechEntries.length > 0) {
+            {
                 const [msg, body] = client.getMessageBuffer(SN_WEAR_INFO,
                     HEADER_SIZE + (ENTRY_SIZE * mechEntries.length));
 
-                //Header
-                body.writeUint8(1, 0);                              // SuccessFlag
-                body.writeUint8(mechEntries.length, 1);             // EntryCount
-                body.writeUint32LE(accountId || 0, 2);              // AccountKey
-                body.writeUint32LE(0, 6);                           // Unknown
-                body.writeUint32LE(defaultMech, 10);                // DefaultMechType
+                body.writeUint8(1, 0);
+                body.writeUint8(mechEntries.length, 1);
+                body.writeUint32LE(0, 2);           // pilotSerialIndex
+                body.writeUint32LE(client.pilot_, 6); // pilotItemIndex
+                body.writeUint32LE(defaultMech, 10); // selectedMechType (1-based)
 
-                //Per-mech entries
                 let offset = HEADER_SIZE;
                 for (const entry of mechEntries) {
-                    body.writeUint32LE(entry.mechType, offset);     // MechType
+                    body.writeUint32LE(entry.mechType, offset);
                     for (let s = 0; s < 6; s++) {
                         body.writeUint32LE(entry.slots[s].uniqueKey, offset + 4 + s * 8);
                         body.writeUint32LE(entry.slots[s].itemIndex, offset + 4 + s * 8 + 4);
@@ -610,16 +684,22 @@ class ZAccountDispatch
                 }
 
                 client.send(msg);
-                console.log(`[ZDispatchAccount] >> Sent SN_WEAR_INFO: ${mechEntries.length} mechs, default=${defaultMech}`);
+                const bodySlotCount = mechEntries.filter(e => e.slots[0].itemIndex !== 0).length;
+                console.log(`[ZDispatchAccount] >> Sent SN_WEAR_INFO: ${mechEntries.length} mechs, default=${defaultMech}, pilot=${client.pilot_}, bodySlots=${bodySlotCount}`);
             }
         }
 
-        // SN_COMPLETE
+        // SN_COMPLETE — signals client that all account data has been sent.
         {
+            const done = (tutorials || []).filter(t => t.completed).map(t => t.tutorial_id);
             const [msg, body] = client.getMessageBuffer(SN_COMPLETE, 0x100);
             body.writeUint16LE(0x0000, 0);
             body.writeInt32LE(0x0000, 2);
+            let bitmask = 0;
+            for (const id of done) bitmask |= (1 << (id - 1));
+            body.writeUint8(bitmask, 6);
             client.send(msg);
+            console.log(`[ZDispatchAccount] >> Sent SN_COMPLETE: tutorials bitmask=0x${bitmask.toString(16)} done=[${done.join(',')}]`);
         }
 
         // Gate server/channel info

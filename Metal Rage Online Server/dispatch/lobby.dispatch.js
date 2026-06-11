@@ -114,10 +114,40 @@ class ZLobbyDispatch
             case 0x00230131:
             {
                 console.log(`[ZLobbyDispatch] >> Lobby Room Create CQ (guessed)`);
+                const roomType = body.length > 0 ? body[0] : 0;
+                const mapSeed = body.length >= 6 ? body.readUint32LE(2) : 0;
+                const mapId = body.length >= 10 ? body.readUint32LE(6) : (mapSeed || 1);
+                const requestedMaxPlayers = body.length > 0x0B ? body[0x0B] : 8;
+                const gameMode = body.length > 0x0C ? body[0x0C] : 0;
+                const isCampaignLike = roomType === 2 || gameMode === 5 || (roomType === 1 && gameMode === 4);
+                const isTrueCampaign = isCampaignLike;  // 로비 경로에서는 campaignLike=trueCampaign
+                const effectiveRoomType = isCampaignLike ? 2 : roomType;
+                client.roomIndex_ = client.roomIndex_ || 1;
+                client.roomType_ = effectiveRoomType;
+                client.rawRoomType_ = roomType;
+                client.mapId_ = mapId;
+                client.mapSeed_ = mapSeed;
+                client.maxPlayers_ = isCampaignLike
+                    ? Math.min(Math.max(requestedMaxPlayers || 4, 1), 4)
+                    : Math.min(Math.max(requestedMaxPlayers || 8, 1), 8);
+                client.gameMode_ = gameMode;
+                client.campaignRoom_ = isCampaignLike;
+                client.isTrueCampaign_ = isTrueCampaign;
+
                 const [msg, respBody] = client.getMessageBuffer(0x00230132, 0x6);
                 respBody.writeUint16LE(0x0000, 0);
                 respBody.writeUint32LE(0x0000, 2);
                 client.send(msg);
+
+                setTimeout(() => {
+                    try {
+                        const ZRoomDispatch = require('./room.dispatch');
+                        new ZRoomDispatch().sendRoomState(client);
+                        console.log(`[ZLobbyDispatch] >> Sent room state after Lobby Create CQ`);
+                    } catch (err) {
+                        console.error(`[ZLobbyDispatch] >> Lobby Create room state error:`, err.message);
+                    }
+                }, 250);
                 return true;
             }
 
