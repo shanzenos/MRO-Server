@@ -32,9 +32,9 @@ class ZGameDispatch
 
         switch (type) {
 
-            // 0x00250102 = 게임 씬 진입 알림
-            // - 게임 시작 전(채널/창고): 무시 (Ready_Host_SQ를 보내면 BeginRound가 너무 일찍 발생)
-            // - 게임 시작 후(훈련장 씬 로드): Ready_Host_SQ 전송
+            // 0x00250102 = 게임 씬 진입 알림 (game scene entry notification)
+            // - 게임 시작 전(채널/창고): 무시 (Ready_Host_SQ를 보내면 BeginRound가 너무 일찍 발생) (before game start (channel/hangar): ignore — sending Ready_Host_SQ causes BeginRound too early)
+            // - 게임 시작 후(훈련장 씬 로드): Ready_Host_SQ 전송 (after game start (training scene load): send Ready_Host_SQ)
             case 0x00250102:
                 if (client.gameStarted_) {
                     console.log(`[ZGameDispatch] >> 게임 씬 진입 알림 (0x00250102) — Ready_Host_SQ 전송`);
@@ -52,12 +52,12 @@ class ZGameDispatch
                 }
                 return true;
 
-            // 0x00250204 = Ready_Host_CA — 클라이언트가 준비 확인에 응답
+            // 0x00250204 = Ready_Host_CA — 클라이언트가 준비 확인에 응답 (client responds to the ready confirmation)
             case 0x00250204:
             {
                 console.log(`[ZGameDispatch] >> Ready_Host_CA (0x00250204) body: ${body.toString('hex')}`);
 
-                // Ready_Success_SN (0x00250201) — 준비 완료
+                // Ready_Success_SN (0x00250201) — 준비 완료 (ready complete)
                 {
                     const [msg, respBody] = client.getMessageBuffer(0x00250201, 0x6);
                     respBody.writeUint16LE(0x0000, 0);
@@ -66,7 +66,7 @@ class ZGameDispatch
                     console.log(`[ZGameDispatch] >> Sent 0x00250201 (Ready_Success_SN)`);
                 }
 
-                // BeginRound_SN (0x00250301) — 라운드 시작
+                // BeginRound_SN (0x00250301) — 라운드 시작 (round start)
                 setTimeout(() => {
                     const [msg, respBody] = client.getMessageBuffer(0x00250301, 0x6);
                     respBody.writeUint16LE(0x0000, 0);
@@ -77,7 +77,7 @@ class ZGameDispatch
                 return true;
             }
 
-            // 0x00250202 = Ready_Host_SN — 다른 플레이어 준비 알림 (멀티 전용, 무시)
+            // 0x00250202 = Ready_Host_SN — 다른 플레이어 준비 알림 (멀티 전용, 무시) (other player ready notification, multiplayer only, ignore)
             case 0x00250202:
                 return true;
 

@@ -21,7 +21,7 @@ function sendRoomMapPackets(client, ctx, getExactMessageBuffer) {
     const bodySize = 6 + count * 9;
     {
         const [msgAll, bodyAll] = getExactMessageBuffer(SN_MAP_CHANGE_ALL, bodySize);
-        // byte[0]=0(flag), byte[1]=count — 클라이언트 파서 기대 포맷
+        // byte[0]=0(flag), byte[1]=count — 클라이언트 파서 기대 포맷 (expected format by the client parser)
         bodyAll.writeUint8(0, 0x00);
         bodyAll.writeUint8(count, 0x01);
         bodyAll.writeUint32LE(0, 0x02);

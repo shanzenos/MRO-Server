@@ -542,7 +542,7 @@ class ZAccountDispatch
 
         // SN_MAP_INFO
         {
-            const mapCount = maps.length;  // || MAX_MAP_COUNT 제거
+            const mapCount = maps.length;  // || MAX_MAP_COUNT 제거 (removed)
             const [msg, body] = client.getMessageBuffer(SN_MAP_INFO, 0x2 + (4 * mapCount));
             let offset = 0;
             body[offset++] = 0x00;
@@ -642,7 +642,7 @@ class ZAccountDispatch
                     const slot = Number(item.part_slot);
                     if (slot >= 0 && slot < 6 && mechSlots[item.mech_type]) {
                         const rawId = Number(item.item_id) || 0;
-                        // body 슬롯(slot=0)은 Cache.Bin 인덱스로 변환
+                        // body 슬롯(slot=0)은 Cache.Bin 인덱스로 변환 (body slot (slot=0) is converted to Cache.Bin index)
                         const BODY_IDX = {
                             11100101:84, 12100101:97, 13100101:110,
                             14200101:123, 14300101:130, 15200101:136,

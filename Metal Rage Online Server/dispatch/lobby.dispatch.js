@@ -120,7 +120,7 @@ class ZLobbyDispatch
                 const requestedMaxPlayers = body.length > 0x0B ? body[0x0B] : 8;
                 const gameMode = body.length > 0x0C ? body[0x0C] : 0;
                 const isCampaignLike = roomType === 2 || gameMode === 5 || (roomType === 1 && gameMode === 4);
-                const isTrueCampaign = isCampaignLike;  // 로비 경로에서는 campaignLike=trueCampaign
+                const isTrueCampaign = isCampaignLike;  // 로비 경로에서는 campaignLike=trueCampaign (in the lobby path, campaignLike=trueCampaign)
                 const effectiveRoomType = isCampaignLike ? 2 : roomType;
                 client.roomIndex_ = client.roomIndex_ || 1;
                 client.roomType_ = effectiveRoomType;

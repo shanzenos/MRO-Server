@@ -31,8 +31,8 @@ function sendReadySuccessAndBeginRound(client, sourceTag) {
     }
 
     setTimeout(() => {
-        // BeginRound_SN — 실제 서버는 IP:Port/MapName 형식으로 ClientTravel
-        // Cache.Bin 인덱스 → 맵 파일명 변환
+        // BeginRound_SN — 실제 서버는 IP:Port/MapName 형식으로 ClientTravel (real server ClientTravels in IP:Port/MapName format)
+        // Cache.Bin 인덱스 → 맵 파일명 변환 (Cache.Bin index → map filename conversion)
         const CACHE_INDEX_TO_MAP_NAME = {
             58: 'Map_PC01', 70: 'Map_PC02', 64: 'Map_PC03', 77: 'Map_PC04',
             8: 'Map_C01', 34: 'Map_C02', 83: 'Map_C03', 32: 'Map_C04',
@@ -84,9 +84,9 @@ class ZCommunityDispatch
         (body.length > 0 ? ` body: ${body.toString('hex')}` : ''));
         const prefix = (type >> 16) & 0xFF;
 
-        // ── DEBUG: 상점 opcode 탐색용 전체 패킷 로깅 ──────────────────────────
-        // 상점/창고 진입시 어떤 opcode가 오는지 확인하기 위해 모든 패킷을 찍습니다.
-        // 원인 파악 후 이 블록을 삭제하세요.
+        // ── DEBUG: 상점 opcode 탐색용 전체 패킷 로깅 (full packet logging for shop opcode discovery) ──────────────────────────
+        // 상점/창고 진입시 어떤 opcode가 오는지 확인하기 위해 모든 패킷을 찍습니다. (logs all packets to see which opcodes arrive when entering the shop/warehouse)
+        // 원인 파악 후 이 블록을 삭제하세요. (delete this block after identifying the cause)
         console.log(`[DEBUG_ALL] 0x${type.toString(16).padStart(8,'0')} prefix=0x${prefix.toString(16)} (${body.length} bytes)` +
             (body.length > 0 && body.length <= 32 ? ` | ${body.toString('hex')}` : ''));
         // ─────────────────────────────────────────────────────────────────────
@@ -125,7 +125,7 @@ class ZCommunityDispatch
         }
 
         // License info query from game server — MUST send full SN_LICENSE_INFO
-        // A blank ACK (0x00260122) wipes the client's license list → "기간만료" + "라이선스 없음"
+        // A blank ACK (0x00260122) wipes the client's license list → "기간만료" (expired) + "라이선스 없음" (no license)
         if (type === CQ_LICENSE_QUERY) {
             this.sendLicenseInfo(client);
             return true;

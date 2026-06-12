@@ -33,25 +33,25 @@ let nextRoomIndex = 1;
 //
 // Change only one field at a time while testing difficulty buttons.
 const MAP_CHANGE_ONE_SA_EXPERIMENT = {
-    mode: 'manual',  // SA에 현재 선택된 맵 캐시키를 반환
+    mode: 'manual',  // SA에 현재 선택된 맵 캐시키를 반환 (returns the currently selected map cache key in the SA)
     manual: {
         b0: 0,
-        w1: 'current_cache',  // CAMPAIGN_MAP_CACHE_INDEX_BY_MAP_ID[mapId]로 resolve됨
+        w1: 'current_cache',  // CAMPAIGN_MAP_CACHE_INDEX_BY_MAP_ID[mapId]로 resolve됨 (resolved via CAMPAIGN_MAP_CACHE_INDEX_BY_MAP_ID[mapId])
         w2: 0,
         b5: 0,
         w6: 0,
         w8: 0,
     },
 };
-// Cache.Bin에서 추출한 맵 인덱스 매핑
+// Cache.Bin에서 추출한 맵 인덱스 매핑 (map index mapping extracted from Cache.Bin)
 // map_id(DB) → cacheIndex(Cache.Bin)
 const CAMPAIGN_MAP_CACHE_INDEX_BY_MAP_ID = {
-    0: 1,   // Map_Ptuto  (튜토리얼)
+    0: 1,   // Map_Ptuto  (튜토리얼 / tutorial)
     1: 8,   // Map_C01
     2: 34,  // Map_C02
     3: 83,  // Map_C03
     4: 32,  // Map_C04
-    5: 58, // Map_PC01 (캠페인 기본 - Map_C05는 클라이언트에 없음)
+    5: 58, // Map_PC01 (캠페인 기본 - Map_C05는 클라이언트에 없음) (campaign default - Map_C05 does not exist in the client)
     6: 6,   // Map_C06
     7: 2,   // Map_C08
     8: 26,  // Map_C09
@@ -124,8 +124,8 @@ function sendReadyHostSn(client)
     const port = 30907;
     const mapCacheKey = Number(client.campaignMapCacheKey_) || 58;
     const mapName = CACHE_INDEX_TO_MAP_NAME_GG[mapCacheKey] || 'Map_PC01';
-    // 실제 서버: IP:Port/MapName?team=0 형식으로 ClientTravel
-    // ip 필드에 "IP/MapName" 형식으로 전달 시도
+    // 실제 서버: IP:Port/MapName?team=0 형식으로 ClientTravel (real server: ClientTravel in IP:Port/MapName?team=0 format)
+    // ip 필드에 "IP/MapName" 형식으로 전달 시도 (attempt to pass in "IP/MapName" format in the ip field)
     const ipWithMap = ip + '/' + mapName;
     const [msg, respBody] = getExactMessageBuffer(0x00420115, 0x13);
     respBody.writeUInt16LE(port, 0x00);
@@ -147,7 +147,7 @@ function sendGameInfoSn(client, tag)
     const BODY_SIZE = 0x1A;
     const [msg, body] = getExactMessageBuffer(0x00222111, BODY_SIZE);
 
-    const mapId = Number(client.campaignMapCacheKey_ || CAMPAIGN_MAP_CACHE_INDEX_BY_MAP_ID[client.mapId_] || client.mapId_ || 58) & 0xFFFF;  // Cache.Bin 인덱스로 전송
+    const mapId = Number(client.campaignMapCacheKey_ || CAMPAIGN_MAP_CACHE_INDEX_BY_MAP_ID[client.mapId_] || client.mapId_ || 58) & 0xFFFF;  // Cache.Bin 인덱스로 전송 (sent as Cache.Bin index)
     const userIndex = Number(client.accountIndex_ || client.accountId_ || 1) & 0xFFFF;
     const battleIndex = 1;
     const redTeamIndex = 1;
@@ -371,7 +371,7 @@ function resendRoomMapOnly(client, tag)
         }
 
         const { sendRoomMapPackets, sendCampaignBootstrap } = require('./room/room-map.sender');
-        // sendRoomState와 동일한 맵 목록 사용 (CAMPAIGN_MAP_ALL_HINTS)
+        // sendRoomState와 동일한 맵 목록 사용 — same map list as sendRoomState (CAMPAIGN_MAP_ALL_HINTS)
         const campaignMapAllHints = [8, 37, 30, 34, 43, 6, 2, 26, 36, 43, 16, 24, 45, 47, 49, 14, 10, 22, 52, 30, 18];
         const roomDefaultEntryHints = [8, 37, 30, 34, 6, 2];
         const mapId = client.createdMapId_ || client.mapId_ || 1;
@@ -448,13 +448,13 @@ class ZGateGameDispatch
                 const roomPassword = hasPassword
                     ? body.subarray(40, Math.min(body.length, 51)).toString('ascii').split('\0').shift()
                     : '';
-                // isCampaignLike: roomType 1(캠페인)과 2(PvP) 모두 최대 8명 슬롯 유지용
+                // isCampaignLike: roomType 1(캠페인)과 2(PvP) 모두 최대 8명 슬롯 유지용 (keeps max 8-player slots for both roomType 1 (campaign) and 2 (PvP))
                 const isCampaignLike = (roomType === 1) || (roomType === 2) || (gameMode === 4 || gameMode === 5);
                 const effectiveRoomType = isCampaignLike ? 2 : roomType;
                 const maxPlayers = isCampaignLike
                     ? 8
                     : Math.min(Math.max(roomNumberValue || 1, 1), 8);
-                // isTrueCampaign: 실제 캠페인 방 여부 (PvP는 false)
+                // isTrueCampaign: 실제 캠페인 방 여부 (PvP는 false) (whether it is an actual campaign room, PvP=false)
                 const isTrueCampaign = (roomType === 1) || (gameMode === 4 || gameMode === 5);
 
                 console.log(`[ZGateGameDispatch] >> Creating room #${roomIndex} (type=${roomType}->${effectiveRoomType}, map=${mapId}, opt1=0x${createWord1.toString(16)}, opt2=0x${createWord2.toString(16)}, max=${maxPlayers}, mode=${gameMode}, valueFlag=${roomNumberFlag}, value=${roomNumberValue}) for "${nickname}"`);
@@ -478,7 +478,7 @@ class ZGateGameDispatch
                 client.gameMode_ = gameMode;
                 client.mapSeed_ = (createWord2 << 16) | createWord1;
                 client.campaignRoom_ = isCampaignLike;
-                client.isTrueCampaign_ = isTrueCampaign;  // 실제 캠페인 여부 (PvP=false)
+                client.isTrueCampaign_ = isTrueCampaign;  // 실제 캠페인 여부 (PvP=false) (whether it is an actual campaign room, PvP=false)
                 client.createdMapId_ = mapId;
                 client.campaignMapCacheKey_ = CAMPAIGN_MAP_CACHE_INDEX_BY_MAP_ID[mapId] || 8;
                 client.readyHostHandshakeSent_ = false;
@@ -558,14 +558,14 @@ class ZGateGameDispatch
             }
 
             // ==========================================
-            // Room Enter CN (씬 로드 완료 알림)
-            // 클라이언트가 방 씬 로드 후 반복 전송 — 방 상태 재전송으로 응답
+            // Room Enter CN (씬 로드 완료 알림 / scene load complete notification)
+            // 클라이언트가 방 씬 로드 후 반복 전송 — 방 상태 재전송으로 응답 (client sends this repeatedly after loading the room scene — respond by re-sending room state)
             // ==========================================
             case 0x00222101:
             {
                 console.log(`[ZGateGameDispatch] >> Room Enter CN (0x00222101) — ACK only`);
                 sendOkSa(client, 0x00222102, 'Room_Enter_SN');
-                // 최초 1회만 방 상태 재전송, 이후는 ACK만
+                // 최초 1회만 방 상태 재전송, 이후는 ACK만 (re-send room state only on the first occurrence; ACK only thereafter)
                 if (!client.roomEnterAcked_) {
                     client.roomEnterAcked_ = true;
                     resendRoomState(client, 'room-enter cn (first)');
@@ -592,8 +592,8 @@ class ZGateGameDispatch
                 if (READY_HOST_GATE_PRIME_MODE === 'enabled' && client.campaignStarted_) {
                     sendReadyHostSq(client);
                 }
-                // Game_Info_SN을 먼저 보내고, 그 다음 Game_Ready_SN + Game_Start_SN
-                // 클라이언트가 Game_Info_SN의 mapId를 읽어서 ClientTravel 대상 맵을 결정하기 때문
+                // Game_Info_SN을 먼저 보내고, 그 다음 Game_Ready_SN + Game_Start_SN (send Game_Info_SN first, then Game_Ready_SN + Game_Start_SN)
+                // 클라이언트가 Game_Info_SN의 mapId를 읽어서 ClientTravel 대상 맵을 결정하기 때문 (because the client reads the mapId from Game_Info_SN to determine the ClientTravel target map)
                 scheduleGameInfoSnExperiment(client);
                 setTimeout(() => {
                     if (GAME_START_HANDSHAKE_MODE === 'ready_then_start') {
@@ -610,7 +610,7 @@ class ZGateGameDispatch
                         scheduleGameWaitSnExperiment(client);
                         schedulePostGameWaitReadyHost(client);
                     }
-                }, 400); // Game_Info_SN 전송 후 400ms 대기
+                }, 400); // Game_Info_SN 전송 후 400ms 대기 (wait 400ms after sending Game_Info_SN)
                 return true;
             }
 
