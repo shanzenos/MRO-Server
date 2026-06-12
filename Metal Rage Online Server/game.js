@@ -17,8 +17,8 @@ const ZCommunityDispatch = require('./dispatch/community.dispatch');
 //   0x23XXXX = ZDispatchLobby
 //   0x24XXXX = ZDispatchRoom
 //   0x25XXXX = ZDispatchGame
-//   0x26XXXX = ZDispatchQuest/Hangar
-//   0x31XXXX = ZDispatchHangar
+//   0x26XXXX = ZDispatchQuest/License
+//   0x31XXXX = ZDispatchPostbox (NOT Hangar — Hangar is 0x24XXXX)
 //   0x32XXXX = ZDispatchCard
 //   0x36XXXX = ZDispatchClan
 //
