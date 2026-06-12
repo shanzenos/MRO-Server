@@ -25,7 +25,7 @@ for (const index in names) {
         count++;
         if (count % 50 === 0) process.stdout.write(`\r[${count}/${names.length}] 복호화 중...`);
     } catch (e) {
-        // 파일 없으면 건너뜀
+        // 파일 없으면 건너뜀 (skip if file not found)
     }
 }
 console.log(`\n완료: ${count}개 파일 복호화 -> decrypted/`);

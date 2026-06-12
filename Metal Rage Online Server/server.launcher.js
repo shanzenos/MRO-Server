@@ -15,11 +15,11 @@ http.use((req, res, next) => {
     next();
 });
 
-// 런처 로그인 요청 처리 - /s 경로로 들어오는 인증 요청
+// 런처 로그인 요청 처리 - /s 경로로 들어오는 인증 요청 (handle launcher login request - authentication request via /s path)
 http.post('/s', (req, res) => {
     console.log('[LOGIN] Launcher login request:', req.body);
     const username = req.body.id || req.body.username || req.body.user || 'Player';
-    // 성공 응답 (실제 형식은 로그 확인 후 조정 필요)
+    // 성공 응답 (실제 형식은 로그 확인 후 조정 필요) (success response — actual format needs to be adjusted after checking logs)
     res.send(`1\t${username}\t0\t0\t0`);
 });
 

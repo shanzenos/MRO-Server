@@ -94,7 +94,7 @@ const CAMPAIGN_MAP_CACHE_INDEX_BY_MAP_ID = {
     2: 37,  // Map_C02
     3: 30,  // Map_C03
     4: 34,  // Map_C04
-    5: 58,  // Map_PC01 (C05 대응)
+    5: 58,  // Map_PC01 (C05 대응 / maps to C05)
     6: 6,   // Map_C06
     7: 2,   // Map_C08
     8: 26,  // Map_C09
@@ -125,18 +125,18 @@ const CACHE_INDEX_BY_ITEM_ID = loadCacheIndexByItemId();
 function loadCacheIndexByItemId() {
     const map = {};
     try {
-        // Cache.Bin 탐색: 상위 디렉토리 순회 + 절대경로 폴백
+        // Cache.Bin 탐색: 상위 디렉토리 순회 + 절대경로 폴백 (Cache.Bin search: traverse parent directories + absolute path fallback)
         let cachePath = null;
-        // 1. __dirname 기준 상위 10단계까지 탐색
+        // 1. __dirname 기준 상위 10단계까지 탐색 (search up to 10 levels above __dirname)
         let searchDir = __dirname;
         for (let i = 0; i < 10; i++) {
             const parent = path.dirname(searchDir);
-            if (parent === searchDir) break; // 루트 도달
+            if (parent === searchDir) break; // 루트 도달 (root reached)
             searchDir = parent;
             const candidate = path.join(searchDir, 'MetalRage', 'Data', 'System', 'Cache.Bin');
             if (fs.existsSync(candidate)) { cachePath = candidate; break; }
         }
-        // 2. process.cwd() 기준도 탐색
+        // 2. process.cwd() 기준도 탐색 (also search from process.cwd())
         if (!cachePath) {
             let cwdDir = process.cwd();
             for (let i = 0; i < 10; i++) {
@@ -148,7 +148,7 @@ function loadCacheIndexByItemId() {
             }
         }
         if (!cachePath) cachePath = path.resolve(__dirname, '..', '..', 'MetalRage', 'Data', 'System', 'Cache.Bin');
-        // Desktop 직접 경로 추가
+        // Desktop 직접 경로 추가 (add direct Desktop path)
         if (!cachePath || !fs.existsSync(cachePath)) {
             const homeDir = require("os").homedir();
             const desktopCand = path.join(homeDir, "Desktop", "MetalRage", "Data", "System", "Cache.Bin");
@@ -401,7 +401,7 @@ class ZRoomDispatch
                     await this.sendPackageItems(client);
                     await this.sendHangarWearInfo(client);
 
-                    // 기본 슬롯 1번 지정 — 새 계정에서 클라가 슬롯을 모를 때 트리거
+                    // 기본 슬롯 1번 지정 — 새 계정에서 클라가 슬롯을 모를 때 트리거 (assign default slot 1 — triggers when the client doesn't know the slot for a new account)
                     {
                         const [msg, respBody] = getExactMessageBuffer(0x00240113, 0x0A);
                         respBody.writeUInt16LE(0, 0x00);
@@ -416,10 +416,10 @@ class ZRoomDispatch
                     this.scheduleShopListRefresh(client, 1, 500, 'initial default');
                 }, 50);
 
-                // Slot_Change_SA 딜레이 전송 — 클라가 0x240107 CQ를 안 보낼 경우 강제 렌더링
+                // Slot_Change_SA 딜레이 전송 — 클라가 0x240107 CQ를 안 보낼 경우 강제 렌더링 (delayed Slot_Change_SA send — force render if the client does not send 0x240107 CQ)
                 setTimeout(async () => {
                     try {
-                        // 클라가 이미 슬롯 선택했으면 스킵
+                        // 클라가 이미 슬롯 선택했으면 스킵 (skip if the client has already selected a slot)
                         if (client.currentHangarSlot_) return;
                         const slotPayload = await this.buildSlotChangePayload(client, Buffer.alloc(0x1C));
                         slotPayload.writeUInt32LE(1, 0);
@@ -588,7 +588,7 @@ class ZRoomDispatch
             {
                 if (body.length >= 0x1C) {
                     const slot = body.readUInt32LE(0x00);
-                    client.currentHangarSlot_ = slot; // 현재 선택 슬롯 기억
+                    client.currentHangarSlot_ = slot; // 현재 선택 슬롯 기억 (remember current selected slot)
                     (async () => {
                         const slotPayload = await this.buildSlotChangePayload(client, body);
                         const [msg, respBody] = getExactMessageBuffer(0x00240108, 0x22);
@@ -690,8 +690,8 @@ class ZRoomDispatch
                     result = 1;
                 } else {
                     const catType = catalogCategoryType(item);
-                    // category_type → part_slot 매핑
-                    // 2=주무기→1, 3=보조무기→2, 4=부스터→4, 5=스킨→5, 6=장비→4, 7=부스터→4, 8=지원→5
+                    // category_type → part_slot 매핑 (category_type → part_slot mapping)
+                    // 2=주무기→1, 3=보조무기→2, 4=부스터→4, 5=스킨→5, 6=장비→4, 7=부스터→4, 8=지원→5 (2=MainWeapon→1, 3=SubWeapon→2, 4=Booster→4, 5=Skin→5, 6=Equipment→4, 7=Booster→4, 8=Support→5)
                     const partSlotMap = { 2: 1, 3: 2, 4: 4, 5: 4, 6: 4, 7: 4, 8: 4 };
                     const partSlot = partSlotMap[catType] ?? 1;
                     const mechType = Number(item.mech_type) || 0;
@@ -716,8 +716,8 @@ class ZRoomDispatch
         if (result === 0) {
             this.sendPackageMoney(client);
             await this.sendPackageItems(client);
-            await this.sendHangarWearInfo(client);  // 구매 후 슬롯 즉시 갱신
-            // 현재 슬롯 상점도 갱신해서 구매한 아이템 반영
+            await this.sendHangarWearInfo(client);  // 구매 후 슬롯 즉시 갱신 (immediately refresh slot after purchase)
+            // 현재 슬롯 상점도 갱신해서 구매한 아이템 반영 (also refresh the current slot shop to reflect the purchased item)
             const currentSlot = client.currentHangarSlot_ || 1;
             this.scheduleShopListRepaint(client, currentSlot, 100, 'post purchase');
         }
