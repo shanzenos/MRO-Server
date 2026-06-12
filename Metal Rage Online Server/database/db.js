@@ -2,7 +2,7 @@ const mysql = require('mysql2/promise');
 const path = require('path');
 
 // Load DB config from config.json (editable per-machine)
-let dbConfig = { host: '127.0.0.1', port: 3306, user: 'root', password: 'root', database: 'mro' };
+let dbConfig = { host: '127.0.0.1', port: 3306, user: 'root', password: '', database: 'mro' };
 try {
     const loaded = require('./config.json');
     dbConfig = { ...dbConfig, ...loaded };
