@@ -4,7 +4,7 @@ const { pack, unpack, peekLength } = require('./message.js');
 
 const MSG_HEADER_SIZE = 0x10;
 const MSG_DEFAULT_SALT = 0xf0f00f0f;
-const MSG_MAX_SIZE = 0x400;
+const MSG_MAX_SIZE = 0x1000;
 
 const MSG_HANDSHAKE = 0x00020080;
 const MSG_HANDSHAKE_RESPONSE = 0x00020081;
@@ -239,8 +239,9 @@ class NetworkClient
      */
     send(data)
     {
-        data = pack(data, this.salt_);
-        this.socket_.write(data);
+        const copy = Buffer.from(data);
+        pack(copy, this.salt_);
+        this.socket_.write(copy);
     }
 
     /**
