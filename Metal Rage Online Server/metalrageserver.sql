@@ -1,6 +1,5 @@
 -- ======================================================
--- Metal Rage Online - Complete Integrated Database Setup
--- Compatible with MySQL 5.5+ (Column Name & Duplicate Fixed)
+-- Metal Rage Online - Complete Database Setup
 -- ======================================================
 
 CREATE DATABASE IF NOT EXISTS `mro` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
@@ -68,6 +67,7 @@ CREATE TABLE `mech_licenses` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- [해결] item_id 컬럼 뒤쪽의 숨은 공백 문자열 완벽 제거
+-- [Resolved] Completely removed hidden whitespace characters following the item_id column.
 CREATE TABLE `items` (
     `id`              INT UNSIGNED    AUTO_INCREMENT PRIMARY KEY,
     `account_id`      INT UNSIGNED    NOT NULL,
