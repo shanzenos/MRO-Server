@@ -26,11 +26,20 @@ echo Starting server on ports 9211 + 30907...
 echo Press Ctrl+C to stop.
 echo.
 
-:: Jump to the directory and ensure we handle drive changes
+:: Switch to the server directory
 cd /d "%SERVER_DIR%"
 
-:: Check if node_modules exists
+:: Check if node_modules dependencies exist
 if not exist "node_modules" (
+    echo Dependencies are missing.
+    choice /M "Install dependencies now"
+
+    if errorlevel 2 (
+        echo Installation cancelled.
+        pause
+        exit /b
+    )
+
     echo Installing dependencies...
     call npm install
     echo.
