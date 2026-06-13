@@ -7,6 +7,8 @@ Huge thanks to Ennuo & Zephos for their contributions, their work laid the groun
 
 This server emulator aims to restore online functionality for the 2009 online mech shooter Metal Rage Online, created by GameHI.
 
+A server setup tutorial as well as some documentation can be found in the project's wiki: [MetalRage Online Server Wiki](https://github.com/shanzenos/MRO-Server/wiki)
+
 It is very WIP, currently only supporting basic functionality. 
 
 Server uses the following ports:
