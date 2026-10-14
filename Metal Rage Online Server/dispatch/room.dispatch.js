@@ -1,11 +1,15 @@
 ﻿const NetworkClient = require("../client");
 const db = require('../database/db');
+const { getShareType, getUseTimeSeconds } = require('../database/item-share-type');
 const ZCommunityDispatch = require('./community.dispatch');
 const { sendRoomStatePackets } = require('./room/room-state.sender');
 const { sendRoomUserPackets } = require('./room/room-user.sender');
 const { sendRoomMapPackets, sendCampaignBootstrap } = require('./room/room-map.sender');
 const { sendGameUserBootstrap } = require('./room/room-game-user.sender');
+const rooms = require('../rooms.js');
+const { sendFullRoomList } = require('./room/room-list.sender');
 const { MAX_SLOT_COUNT } = require('../datatypes/enums');
+const { clampMoney, moneyBigInt } = require('./money');
 const fs = require('fs');
 const path = require('path');
 
@@ -78,8 +82,7 @@ const SN_PACKAGE_POINT = 0x00240132;
 const SN_PACKAGE_COUPON = 0x00240133;
 const SN_SHOP_LIST     = 0x00240241;
 const SN_CASH_SHOP     = 0x00240242;
-const HANGAR_POINT_BALANCE = 100000;
-const HANGAR_COUPON_BALANCE = 1000;
+const SLOT_CHANGE_PART_NAMES = ['body', 'main', 'left', 'right', 'equipment', 'skin'];
 // Cache.Bin inspection:
 //   entry 6  -> Map_C06
 //   entry 8  -> Map_C01
@@ -117,60 +120,19 @@ const CAMPAIGN_MAP_CACHE_INDEX_BY_MAP_ID = {
     25: 77, // Map_PC04
 };
 // Campaign map cache indices for SN_MAP_CHANGE_ALL (campaign-only, no PvP PC-maps)
-const CAMPAIGN_MAP_ALL_HINTS = [8, 37, 30, 34, 43, 6, 2, 26, 36, 43, 16, 24, 45, 47, 49, 14, 10, 22, 52, 30, 18];
-const ROOM_DEFAULT_ENTRY_HINTS = [8, 37, 30, 34, 6, 2]; // mech slot entries for SN_ROOM_DEFAULT
-const CAMPAIGN_GAME_USER_BOOTSTRAP_MODE = 'enabled'; // 'disabled' | 'enabled'
-const CACHE_INDEX_BY_ITEM_ID = loadCacheIndexByItemId();
+const MAP_IDS_PVE = [9001, 9002, 9003, 9004, 9005, 9006, 9007, 9008, 9009, 9010, 9011, 9012];
+const MAP_IDS_PVP = [1011, 1021, 1031, 1041, 1051, 1061, 1071, 1081];
+const MAP_ID_DEFAULT_PVE = 9001;
+const MAP_ID_DEFAULT_PVP = 1011;
 
-function loadCacheIndexByItemId() {
-    const map = {};
-    try {
-        // Cache.Bin 탐색: 상위 디렉토리 순회 + 절대경로 폴백 (Cache.Bin search: traverse parent directories + absolute path fallback)
-        let cachePath = null;
-        // 1. __dirname 기준 상위 10단계까지 탐색 (search up to 10 levels above __dirname)
-        let searchDir = __dirname;
-        for (let i = 0; i < 10; i++) {
-            const parent = path.dirname(searchDir);
-            if (parent === searchDir) break; // 루트 도달 (root reached)
-            searchDir = parent;
-            const candidate = path.join(searchDir, 'MetalRage', 'Data', 'System', 'Cache.Bin');
-            if (fs.existsSync(candidate)) { cachePath = candidate; break; }
-        }
-        // 2. process.cwd() 기준도 탐색 (also search from process.cwd())
-        if (!cachePath) {
-            let cwdDir = process.cwd();
-            for (let i = 0; i < 10; i++) {
-                const candidate = path.join(cwdDir, 'MetalRage', 'Data', 'System', 'Cache.Bin');
-                if (fs.existsSync(candidate)) { cachePath = candidate; break; }
-                const parent = path.dirname(cwdDir);
-                if (parent === cwdDir) break;
-                cwdDir = parent;
-            }
-        }
-        if (!cachePath) cachePath = path.resolve(__dirname, '..', '..', 'MetalRage', 'Data', 'System', 'Cache.Bin');
-        // Desktop 직접 경로 추가 (add direct Desktop path)
-        if (!cachePath || !fs.existsSync(cachePath)) {
-            const homeDir = require("os").homedir();
-            const desktopCand = path.join(homeDir, "Desktop", "MetalRage", "Data", "System", "Cache.Bin");
-            if (fs.existsSync(desktopCand)) cachePath = desktopCand;
-        }
-        console.log();
-        const bytes = fs.readFileSync(cachePath);
-        const headerSize = 82;
-        const entrySize = 103;
-        const itemIdOffset = 96;
-        for (let i = 0; headerSize + (i * entrySize) + itemIdOffset + 4 <= bytes.length; i++) {
-            const itemId = bytes.readInt32LE(headerSize + (i * entrySize) + itemIdOffset);
-            if (itemId > 0 && map[itemId] == null) {
-                map[itemId] = i;
-            }
-        }
-        console.log(`[ZRoomDispatch] Loaded ${Object.keys(map).length} Cache.Bin item indexes`);
-    } catch (err) {
-        console.warn(`[ZRoomDispatch] Cache.Bin index load failed: ${err.message}`);
-    }
-    return map;
-}
+const LEGACY_CAMPAIGN_MAP_ALL_HINTS = [8, 37, 30, 34, 43, 6, 2, 26, 36, 43, 16, 24, 45, 47, 49, 14, 10, 22, 52, 30, 18];
+const CAMPAIGN_MAP_ALL_HINTS = MAP_IDS_PVE;
+const ROOM_DEFAULT_ENTRY_HINTS = [8, 37, 30, 34, 6, 2]; // mech slot entries for SN_ROOM_DEFAULT
+
+const { loadCacheIndexByItemId } = require('./cache-index');
+const CACHE_INDEX_DATA = loadCacheIndexByItemId();
+const CACHE_INDEX_BY_ITEM_ID = CACHE_INDEX_DATA.indexByItemId;
+const CACHE_REPRESENT_INDEX_BY_ITEM_ID = CACHE_INDEX_DATA.representByItemId;
 
 function getExactMessageBuffer(type, bodySize) {
     const msg = Buffer.alloc(0x10 + bodySize);
@@ -189,7 +151,7 @@ function resetRoomSessionState(client) {
     client.maxPlayers_ = 0;
     client.gameMode_ = 0;
     client.campaignRoom_ = false;
-    client.campaignStarted_ = false;
+    client.battleStartSequenceArmed_ = false;
     client.gameStarted_ = false;
     client.readyHostHandshakeSent_ = false;
     client.gameUserBootstrapSent_ = false;
@@ -216,6 +178,10 @@ function sendLobbyBootstrapAfterRoomLeave(client) {
         client.send(msg);
         console.log(`[ZRoomDispatch] >> Sent Lobby Room_List_SN 0x230103 after room leave`);
     }
+
+    {
+        sendFullRoomList(client, rooms.listRooms(), getExactMessageBuffer);
+    }
 }
 
 function writeShopListBody(body, shopItems, currencyCode) {
@@ -232,17 +198,22 @@ function writeShopListBody(body, shopItems, currencyCode) {
         const disc = (Number.isFinite(discRaw) && discRaw > 0) ? (discRaw >>> 0) : gold;
         const itemId = Number(item.item_id) || 0;
         const itemIndex = itemId;
-        const isShow = 1;
+        const representIndex = CACHE_REPRESENT_INDEX_BY_ITEM_ID[itemIndex];
+        const isShow = representIndex == null
+            ? 1
+            : (Number(representIndex) === itemIndex ? 1 : 0);
         const isNew = item.is_new == null ? 0 : (Number(item.is_new) ? 1 : 0);
         const isHot = item.is_hot == null ? 0 : (Number(item.is_hot) ? 1 : 0);
 
         body.writeInt32LE(itemIndex, off + 0x00);
         body.writeInt32LE(disc,      off + 0x04);
         body.writeInt32LE(gold,      off + 0x08);
-        body.writeUint8(0,           off + 0x0C);
-        body.writeUint8(isShow,      off + 0x0D);
-        body.writeUint8(isNew,       off + 0x0E);
-        body.writeUint8(isHot,       off + 0x0F);
+        {
+            body.writeUint8(0,           off + 0x0C);
+            body.writeUint8(isShow,      off + 0x0D);
+            body.writeUint8(isNew,       off + 0x0E);
+            body.writeUint8(isHot,       off + 0x0F);
+        }
         body.writeUint8(1,           off + 0x10);
         body.writeUint8(currencyCode.charCodeAt(0), off + 0x11);
         body.writeUint8(0,           off + 0x12);
@@ -265,6 +236,12 @@ function catalogCategoryType(row)
         return fromDb >>> 0;
     const key = String(row.category || '').trim();
     return (SHOP_CATEGORY_TYPE[key] || 2) >>> 0;
+}
+
+function applyShopCompatExperiment(sendItems, cat, selectedSlot)
+{
+    return sendItems;
+
 }
 
 function catalogGoldPrice(row)
@@ -339,6 +316,11 @@ function needsPostSelectShopRefresh(slot)
     return false;
 }
 
+function readSlotChangeSerials(body)
+{
+    return Array.from({ length: 7 }, (_, index) => body.readUInt32LE(index * 4));
+}
+
 module.exports =
 class ZRoomDispatch
 {
@@ -369,8 +351,7 @@ class ZRoomDispatch
                     const [msg, respBody] = getExactMessageBuffer(0x00240102, 0x0E);
                     respBody.writeUint16LE(0x0000, 0);
                     respBody.writeUint32LE(0x00000000, 0x02);
-                    respBody.writeUint32LE(0x00000000, 0x06);
-                    respBody.writeUint32LE(0x00000000, 0x0A);
+                    respBody.writeBigUint64LE(moneyBigInt(client.cash_, 0), 0x06);
                     client.send(msg);
                     console.log(`[ZRoomDispatch] >> Suppressed Hangar bootstrap in campaign room (sent minimal 0x240102 only)`);
                     return true;
@@ -389,14 +370,14 @@ class ZRoomDispatch
                     respBody.writeUint16LE(0x0000, 0);
                     respBody.writeUint32LE(0x00000000, 0x02);
                     // The client displays offsets 0x06/0x0A as one 64-bit cash
-                    // value in this path, so keep Open_SA money fields clear.
-                    respBody.writeUint32LE(0x00000000, 0x06);
-                    respBody.writeUint32LE(0x00000000, 0x0A);
+
+                    respBody.writeBigUint64LE(moneyBigInt(client.cash_, 0), 0x06);
                     client.send(msg);
                     console.log(`[ZRoomDispatch] >> Sent Hangar Open_SA 0x240102 (14 bytes)`);
                 }
 
                 setTimeout(async () => {
+                    try {
                     this.sendPackageMoney(client);
                     await this.sendPackageItems(client);
                     await this.sendHangarWearInfo(client);
@@ -414,6 +395,10 @@ class ZRoomDispatch
                     await this.sendShopList(client, 1);
                     this.scheduleShopListRefresh(client, 1, 150, 'initial default');
                     this.scheduleShopListRefresh(client, 1, 500, 'initial default');
+                    } catch (err) {
+                        console.error('[ZRoomDispatch] Hangar load failed:', err.message);
+                        client.disconnect();
+                    }
                 }, 50);
 
                 // Slot_Change_SA 딜레이 전송 — 클라가 0x240107 CQ를 안 보낼 경우 강제 렌더링 (delayed Slot_Change_SA send — force render if the client does not send 0x240107 CQ)
@@ -463,12 +448,7 @@ class ZRoomDispatch
                 if (body.length >= 5) {
                     const purchaseItemId = body.readUInt32LE(1);
                     if (purchaseItemId >= 10000000) {
-                        (async () => {
-                            await this.handleShopPurchase(client, purchaseItemId, body);
-                        })().catch(err => {
-                            console.error(`[ZRoomDispatch] >> Shop purchase error:`, err.message);
-                        });
-                        return true;
+                        return this.handleShopPurchase(client, purchaseItemId, body).then(() => true);
                     }
                 }
 
@@ -495,9 +475,10 @@ class ZRoomDispatch
                 console.log(`[ZRoomDispatch] >> Body: ${body.toString('hex')}`);
 
                 client.gameStarted_ = true;
-                client.campaignStarted_ = (Number(client.rawRoomType_) === 1) ||
+
+                client.battleStartSequenceArmed_ = (Number(client.rawRoomType_) === 1) ||
                     (Number(client.gameMode_) === 4 || Number(client.gameMode_) === 5);
-                if (client.campaignStarted_) {
+                if (client.battleStartSequenceArmed_) {
                     console.log(`[ZRoomDispatch] >> Campaign solo start armed: room=${client.roomIndex_ || 0}, map=${client.mapId_ || 0}`);
                 }
 
@@ -587,13 +568,28 @@ class ZRoomDispatch
             case 0x00240107:
             {
                 if (body.length >= 0x1C) {
-                    const slot = body.readUInt32LE(0x00);
-                    client.currentHangarSlot_ = slot; // 현재 선택 슬롯 기억 (remember current selected slot)
-                    (async () => {
+                    const serials = readSlotChangeSerials(body);
+                    const slot = serials[0];
+                    return (async () => {
+                        let saveSucceeded = true;
+                        {
+                            try {
+                                await db.saveEquippedLoadout(client.accountId_, slot, serials.slice(1));
+                                client.currentHangarSlot_ = slot;
+                                console.log(
+                                    `[ZRoomDispatch] >> Saved Slot_Change_CQ 0x00240107: ` +
+                                    `slot=${slot} ${SLOT_CHANGE_PART_NAMES.map((name, index) => `${name}=${serials[index + 1]}`).join(' ')}`
+                                );
+                            } catch (err) {
+                                saveSucceeded = false;
+                                console.error(`[ZRoomDispatch] >> Slot_Change_CQ save failed:`, err.message);
+                            }
+                        }
+
                         const slotPayload = await this.buildSlotChangePayload(client, body);
                         const [msg, respBody] = getExactMessageBuffer(0x00240108, 0x22);
-                        respBody.writeUInt16LE(0, 0x00);
-                        respBody.writeUInt32LE(0, 0x02);
+                        respBody.writeUInt16LE(saveSucceeded ? 0 : 1, 0x00);
+                        respBody.writeUInt32LE(saveSucceeded ? 0 : 1, 0x02);
                         slotPayload.copy(respBody, 0x06, 0x00, 0x1C);
                         if (needsPostSelectShopRefresh(slot)) {
                             client.send(msg);
@@ -607,15 +603,12 @@ class ZRoomDispatch
                             console.log(`[ZRoomDispatch] >> Sent Slot_Change_SA 0x240108 after preloaded shop: slot=${slot}`);
                             this.scheduleShopListRefresh(client, slot, 80, 'post slot change');
                         }
-                    })().catch(err => {
-                        console.error(`[ZRoomDispatch] >> Slot shop preload error:`, err.message);
-                    });
+                    })().then(() => true);
                 } else {
                     const [msg, respBody] = client.getMessageBuffer(0x00240108, 0x6);
-                    respBody.writeUint16LE(0x0000, 0);
-                    respBody.writeUint32LE(0x0000, 2);
+                    respBody.writeUint16LE(0x0001, 0);
+                    respBody.writeUint32LE(0x0001, 2);
                     client.send(msg);
-                    console.log(`[ZRoomDispatch] >> Sent Slot_Change_SA 0x240108 fallback`);
                 }
                 return true;
             }
@@ -647,7 +640,7 @@ class ZRoomDispatch
         }
 
         try {
-            const items = await db.getItems(client.accountId_);
+            const items = await db.getItemsWithEquipViews(client.accountId_);
             const equipped = new Map();
             for (const item of items) {
                 if (Number(item.mech_type) !== Number(slot) || Number(item.equipped) !== 1) {
@@ -680,38 +673,107 @@ class ZRoomDispatch
         console.log(`[ZRoomDispatch] >> Shop Buy CQ 0x240201: item_id=${itemId} body=${requestBody.toString('hex')}`);
 
         let result = 0;
+        let responsePoint = clampMoney(client.point_, 100000);
         if (!client.accountId_) {
             result = 1;
         } else {
+            let connection;
             try {
                 const catalog = await db.getItemCatalog();
                 const item = catalog.find(row => Number(row.item_id) === Number(itemId));
                 if (!item) {
                     result = 1;
                 } else {
-                    const catType = catalogCategoryType(item);
-                    // category_type → part_slot 매핑 (category_type → part_slot mapping)
-                    // 2=주무기→1, 3=보조무기→2, 4=부스터→4, 5=스킨→5, 6=장비→4, 7=부스터→4, 8=지원→5 (2=MainWeapon→1, 3=SubWeapon→2, 4=Booster→4, 5=Skin→5, 6=Equipment→4, 7=Booster→4, 8=Support→5)
-                    const partSlotMap = { 2: 1, 3: 2, 4: 4, 5: 4, 6: 4, 7: 4, 8: 4 };
-                    const partSlot = partSlotMap[catType] ?? 1;
-                    const mechType = Number(item.mech_type) || 0;
-                    await db.pool.execute(
-                        'INSERT INTO items (account_id, item_id, slot, mech_type, part_slot, quantity, equipped) VALUES (?, ?, ?, ?, ?, 1, 0)',
-                        [client.accountId_, itemId, partSlot, mechType, partSlot]
+                    const price = clampMoney(item.price || item.discount_price || 0, 0);
+                    connection = await db.pool.getConnection();
+                    await connection.beginTransaction();
+
+                    const [accountRows] = await connection.execute(
+                        'SELECT point FROM accounts WHERE id = ? FOR UPDATE',
+                        [client.accountId_]
                     );
-                    console.log(`[ZRoomDispatch] >> Shop Buy stored item: account=${client.accountId_} item_id=${itemId} mech=${mechType} part=${partSlot}`);
+                    if (accountRows.length === 0) {
+                        result = 1;
+                        await connection.rollback();
+                    } else {
+                        const currentPoint = clampMoney(accountRows[0].point, 100000);
+                        responsePoint = currentPoint;
+                        if (currentPoint < price) {
+                            result = 1;
+                            await connection.rollback();
+                            console.log(`[ZRoomDispatch] >> Shop Buy failed: insufficient point (has ${currentPoint}, needs ${price})`);
+                        } else {
+                            const newPoint = currentPoint - price;
+                            const catType = catalogCategoryType(item);
+                            const partSlotMap = { 2: 1, 3: 2, 4: 4, 5: 4, 6: 4, 7: 4, 8: 4 };
+                            const partSlot = partSlotMap[catType] ?? 1;
+                            const mechType = Number(client.currentHangarSlot_) || 1;
+
+                            let alreadyOwnedPermanentShared = false;
+                            if (getShareType(itemId) === 1
+                                && getUseTimeSeconds(itemId) === 0) {
+                                const [ownedRows] = await connection.execute(
+                                    'SELECT id FROM items WHERE account_id = ? AND item_id = ? LIMIT 1',
+                                    [client.accountId_, itemId]
+                                );
+                                alreadyOwnedPermanentShared = ownedRows.length > 0;
+                            }
+
+                            if (alreadyOwnedPermanentShared) throw new Error('Item already owned');
+                            await connection.execute(
+                                'UPDATE accounts SET point = ? WHERE id = ?',
+                                [newPoint, client.accountId_]
+                            );
+                            if (!alreadyOwnedPermanentShared) {
+                                await connection.execute(
+                                    'INSERT INTO items (account_id, item_id, slot, mech_type, part_slot, quantity, equipped) VALUES (?, ?, ?, ?, ?, 1, 0)',
+                                    [client.accountId_, itemId, partSlot, mechType, partSlot]
+                                );
+                            }
+                            await connection.commit();
+                            client.point_ = newPoint;
+                            responsePoint = newPoint;
+                            {
+                                console.log(`[ZRoomDispatch] >> Shop Buy persisted: account=${client.accountId_} point=${newPoint} item_id=${itemId} mech=${mechType} part=${partSlot}`);
+                            }
+                        }
+                    }
                 }
             } catch (err) {
+                if (connection) {
+                    try {
+                        await connection.rollback();
+                    } catch (rollbackErr) {
+                        console.error(`[ZRoomDispatch] >> Shop Buy rollback error:`, rollbackErr.message);
+                    }
+                }
                 result = 1;
-                console.error(`[ZRoomDispatch] >> Shop Buy DB error:`, err.message);
+                console.error(`[ZRoomDispatch] >> Shop Buy transaction error:`, err.message);
+            } finally {
+                if (connection) connection.release();
             }
         }
 
-        const [msg, body] = getExactMessageBuffer(0x00240202, 0x06);
+        if (result === 0) {
+            try {
+                const items = await db.getItems(client.accountId_);
+                await require('./item-info.sender').sendItemInfo(
+                    client,
+                    items,
+                    client.accountId_,
+                    'shop-purchase'
+                );
+            } catch (err) {
+                console.error(`[ZRoomDispatch] >> Shop purchase ItemInfo refresh error:`, err.message);
+            }
+        }
+
+        const [msg, body] = getExactMessageBuffer(0x00240202, 0x0E);
         body.writeUInt16LE(0, 0x00);
         body.writeUInt32LE(result, 0x02);
+        body.writeBigUint64LE(moneyBigInt(responsePoint, 100000), 0x06);
         client.send(msg);
-        console.log(`[ZRoomDispatch] >> Sent Shop Buy SA 0x240202: result=${result}`);
+        console.log(`[ZRoomDispatch] >> Sent Shop Buy SA 0x240202: result=${result} point=${responsePoint}`);
 
         if (result === 0) {
             this.sendPackageMoney(client);
@@ -720,6 +782,21 @@ class ZRoomDispatch
             // 현재 슬롯 상점도 갱신해서 구매한 아이템 반영 (also refresh the current slot shop to reflect the purchased item)
             const currentSlot = client.currentHangarSlot_ || 1;
             this.scheduleShopListRepaint(client, currentSlot, 100, 'post purchase');
+
+            try {
+                const refreshSlot = Number(client.currentHangarSlot_) || 1;
+                const slotRequest = Buffer.alloc(0x1C);
+                slotRequest.writeUInt32LE(refreshSlot, 0);
+                const slotPayload = await this.buildSlotChangePayload(client, slotRequest);
+                const [msg, respBody] = getExactMessageBuffer(0x00240108, 0x22);
+                respBody.writeUInt16LE(0, 0x00);
+                respBody.writeUInt32LE(0, 0x02);
+                slotPayload.copy(respBody, 0x06, 0x00, 0x1C);
+                client.send(msg);
+                console.log(`[ZRoomDispatch] >> Sent post-buy Slot_Change_SA 0x240108: slot=${refreshSlot}`);
+            } catch (err) {
+                console.error(`[ZRoomDispatch] >> Post-buy Slot_Change_SA resend error:`, err.message);
+            }
         }
     }
 
@@ -782,7 +859,7 @@ class ZRoomDispatch
             const HEADER_SIZE = 14;
             const defaultMech = 1;
 
-            const items = await db.getItems(client.accountId_);
+            const items = await db.getItemsWithEquipViews(client.accountId_);
             const mechSlots = {};
             for (let m = 1; m <= MAX_MECH_COUNT; m++) {
                 mechSlots[m] = Array.from({length: 6}, () => ({uniqueKey: 0, itemIndex: 0}));
@@ -811,8 +888,8 @@ class ZRoomDispatch
             for (let m = 1; m <= MAX_MECH_COUNT; m++) {
                 body.writeUint32LE(m, offset);
                 for (let s = 0; s < 6; s++) {
-                    body.writeUint32LE(mechSlots[m][s].uniqueKey, offset + 4 + s * 8);
-                    body.writeUint32LE(mechSlots[m][s].itemIndex, offset + 4 + s * 8 + 4);
+                    body.writeUint32LE(mechSlots[m][s].itemIndex, offset + 4 + s * 8);
+                    body.writeUint32LE(mechSlots[m][s].uniqueKey, offset + 4 + s * 8 + 4);
                 }
                 offset += ENTRY_SIZE;
             }
@@ -844,20 +921,28 @@ class ZRoomDispatch
             }
 
             for (const [cat, items] of [...groups.entries()].sort(([a],[b]) => a - b)) {
-                const count = Math.min(items.length, CAT_LIMIT[cat] || 25);
-                const sendItems = items.slice(0, count);
 
-                const [msg, respBody] = getExactMessageBuffer(SN_SHOP_LIST,
-                    HEADER_SIZE + (ENTRY_SIZE * count));
-                writeShopListBody(respBody, sendItems, 'P');
-                client.send(msg);
+                const MAX_ENTRIES_PER_FRAME = 45;
+                for (let start = 0; start < items.length; start += MAX_ENTRIES_PER_FRAME) {
+                    const sendItems = items.slice(start, start + MAX_ENTRIES_PER_FRAME);
+                    const count = sendItems.length;
+                    const generalItems = applyShopCompatExperiment(sendItems, cat, selectedSlot);
 
-                const [msg2, body2] = getExactMessageBuffer(SN_CASH_SHOP,
-                    HEADER_SIZE + (ENTRY_SIZE * count));
-                writeShopListBody(body2, sendItems, 'C');
-                client.send(msg2);
+                    const [msg, respBody] = getExactMessageBuffer(SN_SHOP_LIST,
+                        HEADER_SIZE + (ENTRY_SIZE * count));
+                    writeShopListBody(respBody, generalItems, 'P');
+                    client.send(msg);
 
-                console.log(`[ZRoomDispatch] >> Sent ShopList_SN cat=${cat}: ${count} items`);
+                    const [msg2, body2] = getExactMessageBuffer(SN_CASH_SHOP,
+                        HEADER_SIZE + (ENTRY_SIZE * count));
+                    writeShopListBody(body2, sendItems, 'C');
+                    client.send(msg2);
+
+                    console.log(
+                        `[ZRoomDispatch] >> Sent ShopList_SN cat=${cat}: ` +
+                        `${count} items (full catalog part ${Math.floor(start / MAX_ENTRIES_PER_FRAME) + 1})`
+                    );
+                }
             }
 
             console.log(`[ZRoomDispatch] >> Sent ShopList_SN 0x240241: ${allItems.length} total items in ${groups.size} tabs (rawItemId/show/P)`);
@@ -873,40 +958,17 @@ class ZRoomDispatch
             .map((item, index) => ({ item, index }))
             .filter(({ item }) => Number(item.category_type) >= 2 && Number(item.category_type) <= 6);
 
-        if (!selectedSlot || !client.accountId_) {
-            return weaponItems;
-        }
-
-        try {
-            const items = await db.getItems(client.accountId_);
-            const mechItems = weaponItems.filter(({ item }) => Number(item.mech_type) === Number(selectedSlot));
-            if (mechItems.length > 0) {
-                console.log(`[ZRoomDispatch] >> Shop refresh for slot=${selectedSlot}: catalogMech=${selectedSlot}, items=${mechItems.length}`);
-                return interleaveShopFamilies(mechItems);
+        {
+            const uniqueItems = new Map();
+            for (const entry of weaponItems) {
+                const itemId = Number(entry.item.item_id) || 0;
+                if (!uniqueItems.has(itemId)) uniqueItems.set(itemId, entry);
             }
-
-            const equippedMain = items.find(item =>
-                Number(item.mech_type) === Number(selectedSlot) &&
-                Number(item.part_slot) === 1 &&
-                Number(item.equipped) === 1
+            return [...uniqueItems.values()].sort((a, b) =>
+                (Number(a.item.item_id) || 0) - (Number(b.item.item_id) || 0)
             );
-
-            const mainItemId = Number(equippedMain && equippedMain.item_id) || 0;
-            const mainFamily = mainItemId ? Math.floor(mainItemId / 100000) : 0;
-            if (mainFamily) {
-                const familyItems = weaponItems.filter(({ item }) =>
-                    Math.floor((Number(item.item_id) || 0) / 100000) === mainFamily
-                );
-                if (familyItems.length > 0) {
-                    console.log(`[ZRoomDispatch] >> Shop refresh for slot=${selectedSlot}: mainFamily=${mainFamily}, items=${familyItems.length}`);
-                    return interleaveShopFamilies(familyItems);
-                }
-            }
-        } catch (err) {
-            console.error(`[ZRoomDispatch] >> buildShopItems error:`, err.message);
         }
 
-        return weaponItems;
     }
 
     async sendPackageItems(client)
@@ -918,7 +980,10 @@ class ZRoomDispatch
             }
 
             const items = await db.getItems(client.accountId_);
-            const count = Math.min(items.length, 63);
+
+            const PACKAGE_ITEM_MAX = Math.floor((0x400 - 0x10 - 1) / 8);
+            const count = Math.min(items.length, PACKAGE_ITEM_MAX);
+            if (items.length > count) console.warn(`[ZRoomDispatch] !! Packege_Item_SN truncated: ${items.length} items, sent ${count}`);
             const [msg, body] = getExactMessageBuffer(SN_PACKAGE_ITEM, 1 + (count * 8));
             body.writeUint8(count, 0);
 
@@ -945,22 +1010,20 @@ class ZRoomDispatch
 
     sendPackageMoney(client)
     {
-        const point = HANGAR_POINT_BALANCE;
-        const coupon = HANGAR_COUPON_BALANCE;
+        const point = clampMoney(client.point_, 100000);
+        const coupon = clampMoney(client.coupon_, 0);
 
         {
             const [msg, body] = getExactMessageBuffer(SN_PACKAGE_POINT, 12);
-            body.writeUint32LE(point, 0x00);
-            body.writeUint32LE(point, 0x04);
-            body.writeUint32LE(0, 0x08);
+            body.writeUint32LE(1, 0x00);
+            body.writeBigUint64LE(moneyBigInt(point), 0x04);
             client.send(msg);
         }
 
         {
             const [msg, body] = getExactMessageBuffer(SN_PACKAGE_COUPON, 12);
-            body.writeUint32LE(coupon, 0x00);
-            body.writeUint32LE(coupon, 0x04);
-            body.writeUint32LE(0, 0x08);
+            body.writeUint32LE(1, 0x00);
+            body.writeBigUint64LE(moneyBigInt(coupon), 0x04);
             client.send(msg);
         }
 
@@ -1158,9 +1221,8 @@ class ZRoomDispatch
         const maxPlayers = Math.max(client.maxPlayers_ || 1, 1);
         const currentUsers = 1;
         const gameMode = client.gameMode_ || 0;
-        const mapIndex = client.campaignRoom_
-            ? 1
-            : Math.min(Math.max(Number(mapId) || 1, 1), 6);
+
+        const mapIndex = client.campaignRoom_ ? MAP_ID_DEFAULT_PVE : MAP_ID_DEFAULT_PVP;
         const roomName = (client.roomName_ || client.nickname_ || 'Room').slice(0, 25);
         const nickname = (client.nickname_ || 'Player').slice(0, 25);
         const pilotId = client.pilot_ || 101;
@@ -1172,7 +1234,9 @@ class ZRoomDispatch
         // Re-reading User_Default_SN shows the team word is forwarded directly
         // into Room_User_Add, unlike the separate mapped state fields.
         // team=0 for RED team (first slot); matches 2011 log team=0 URL param.
-        const teamIndex = 0;
+        const trackedRoomForTeam = undefined;
+        const trackedMemberForTeam = trackedRoomForTeam && trackedRoomForTeam.members.get(Number(accountIndex));
+        const teamIndex = trackedMemberForTeam ? trackedMemberForTeam.team : 0;
         // record+0x0C in User_Default_SN is a separate dword field, not the
         // visible room state printed from record+0x13. Keep it neutral.
         const userHiddenRaw = 0;
@@ -1182,7 +1246,15 @@ class ZRoomDispatch
         const packedIp = 0x0100007F;
         const selectedMech = 1;
         const primaryMapCacheIndex = CAMPAIGN_MAP_CACHE_INDEX_BY_MAP_ID[mapId] || ROOM_DEFAULT_ENTRY_HINTS[0] || 8;
-        const campaignMapCacheKey = primaryMapCacheIndex;
+        const selectedCampaignMapId = Number(client.campaignMapCacheKey_);
+        const hasSelectedCampaignMapId = client.campaignRoom_ &&
+            MAP_IDS_PVE.includes(selectedCampaignMapId);
+        const campaignMapCacheKey = hasSelectedCampaignMapId
+            ? selectedCampaignMapId
+            : primaryMapCacheIndex;
+        const selectedRoomMapIndex = hasSelectedCampaignMapId
+            ? selectedCampaignMapId
+            : null;
         const roomSettingGoal = client.campaignRoom_ ? 0 : currentUsers;
         const roomSettingTime = client.campaignRoom_ ? 0 : maxPlayers;
         const roomSettingRound = client.campaignRoom_ ? 1 : 0;
@@ -1197,7 +1269,7 @@ class ZRoomDispatch
             maxPlayers,
             currentUsers,
             gameMode,
-            mapIndex,
+            mapIndex: selectedRoomMapIndex || mapIndex,
             roomName,
             nickname,
             pilotId,
@@ -1216,16 +1288,20 @@ class ZRoomDispatch
             roomDefaultEntryCount,
             roomDefaultEntryHints: ROOM_DEFAULT_ENTRY_HINTS,
             campaignMapHints: CAMPAIGN_MAP_ALL_HINTS,
+            isCampaignRoom: client.campaignRoom_,
+            optionMask: (client.createWord2_ || 0) >>> 0,
+            roomOptions: undefined,
+            isTrueCampaign: client.isTrueCampaign_,
+            mapChangeOneTime: client.mapChangeOneTime_,
+            mapChangeOneRound: client.mapChangeOneRound_,
+            playRound: client.playRound_,
+            mapChangeOneKill: client.mapChangeOneKill_,
+            mapChangeOneGoal: client.mapChangeOneGoal_,
         };
         console.log(`[ZRoomDispatch] >> sendRoomState 호출 (mapId=${mapId}, cacheIndex=${primaryMapCacheIndex})`);
         sendRoomStatePackets(client, ctx, getExactMessageBuffer);
         sendRoomMapPackets(client, ctx, getExactMessageBuffer);
         sendRoomUserPackets(client, ctx, getExactMessageBuffer);
-        if (CAMPAIGN_GAME_USER_BOOTSTRAP_MODE === 'enabled' && client.campaignRoom_) {
-            Promise.resolve(sendGameUserBootstrap(client, ctx, getExactMessageBuffer)).catch((err) => {
-                console.error(`[ZRoomDispatch] >> Game_User_SN bootstrap error: ${err.message}`);
-            });
-        }
         if (client.campaignRoom_) {
             this.sendCampaignBootstrap(client);
         }
@@ -1238,3 +1314,5 @@ class ZRoomDispatch
         sendCampaignBootstrap(client, getExactMessageBuffer);
     }
 };
+
+module.exports.resetRoomSessionState = resetRoomSessionState;

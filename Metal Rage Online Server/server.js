@@ -1,5 +1,8 @@
 const NetworkClient = require('./client.js');
 const { createServer } = require('net');
+const db = require('./database/db');
+const rooms = require('./rooms');
+const { leaveRoomAndNotify } = require('./dispatch/room/room-leave');
 
 const SERVER_PORT = 9211;
 const GAME_PORT = 30907;
@@ -19,7 +22,7 @@ class DispatchServer
 
     start()
     {
-        this.server.listen(this.port, () => {
+        this.server.listen(this.port, '0.0.0.0', () => {
             console.log(`[${this.name}] Listening on port: ${this.port}`);
         });
     }
@@ -27,18 +30,22 @@ class DispatchServer
     onConnection(socket)
     {
         console.log(`[${this.name}] New connection from ${socket.remoteAddress}:${socket.remotePort}`);
+        let pending = Promise.resolve();
         const client = new NetworkClient(socket, (client, type, data) => {
-            for (const service of this.services)
-            {
-                if (service.dispatch(client, type, data))
+            pending = pending.then(async () => {
+                if (socket.destroyed || socket.writableEnded) return;
+                if (this.name === 'GameServer' && !client.accountId_ && type !== 0x00110124) {
+                    client.disconnect();
                     return;
-            }
-
-            // Log unhandled messages with full hex dump for reverse engineering
-            console.log(`[${this.name}] Unhandled message type 0x${type.toString(16).padStart(8, '0')} (${data.length} bytes)`);
-            if (data.length > 0) {
-                console.log(`[${this.name}] Body hex:`, data.toString('hex'));
-            }
+                }
+                for (const service of this.services) {
+                    if (await service.dispatch(client, type, data)) return;
+                }
+                console.log(`[${this.name}] Unhandled message type 0x${type.toString(16)}`);
+            }).catch(err => {
+                console.error(`[${this.name}] Dispatch error:`, err.message);
+                socket.destroy();
+            });
         });
 
         this.clients.push(client);
@@ -51,14 +58,30 @@ class DispatchServer
             const idx = this.clients.indexOf(client);
             if (idx !== -1) this.clients.splice(idx, 1);
             console.log(`[${this.name}] Connection closed (${this.clients.length} remaining)`);
+            const room = rooms.getRoomByAccount(client.accountId_);
+            if (room && room.members.get(client.accountId_)?.client === client) {
+                leaveRoomAndNotify(client.accountId_);
+            }
         });
     }
 };
 
-// Dispatch server handles: Account login, Gate (server/channel selection)
-const dispatchServices = require('./dispatch.js');
-new DispatchServer('DispatchServer', SERVER_PORT, dispatchServices).start();
+async function start()
+{
+    require('./config/server').load();
+    await db.verifyConnection();
+    const dispatch = new DispatchServer('DispatchServer', SERVER_PORT, require('./dispatch.js'));
+    const game = new DispatchServer('GameServer', GAME_PORT, require('./game.js'));
+    rooms.registerLobbyClientSource(game.clients);
+    dispatch.start();
+    game.start();
+}
 
-// Game server handles: Lobby, Room, Game, Hangar, Community, etc.
-const gameServices = require('./game.js');
-new DispatchServer('GameServer', GAME_PORT, gameServices).start();
+if (require.main === module) {
+    start().catch(err => {
+        console.error('[Server] Startup failed:', err.message);
+        db.pool.end().finally(() => { process.exitCode = 1; });
+    });
+}
+
+module.exports = { DispatchServer, start };

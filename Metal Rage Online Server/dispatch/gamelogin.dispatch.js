@@ -1,6 +1,17 @@
 const NetworkClient = require("../client");
 const db = require('../database/db');
 
+const { clampMoney, moneyBigInt } = require('./money');
+
+const { writeRecordInfoBody } = require('./record-info.builder');
+const authTokens = require('../auth-tokens');
+
+const whitelist = require('../config/whitelist.js');
+
+const rooms = require('../rooms.js');
+const { sendFullRoomList } = require('./room/room-list.sender');
+const { resolveRealMapIds, sendMapInfoSN } = require('./map-info.sender');
+
 // Game server login handler
 // After connecting to the game server (port 30907), the client sends
 // 0x00110124 (CQ) to authenticate/enter. We respond with 0x00110125 (SA).
@@ -12,25 +23,23 @@ const SA_GAME_LOGIN = 0x00110125;
 const SN_DEFAULT_INFO  = 0x00210101;
 const SN_RECORD_INFO   = 0x00210103;
 const SN_MECH_LEVEL    = 0x00210104;
-const SN_GRADE_INFO    = 0x00510101;   // ZDispatchCommunity::Grade_Info_SN → Account_Grade_Set → nMedalLevel
+const SN_GRADE_INFO    = 0x00510101;
 const SN_WEAR_INFO     = 0x00210113;   // DLL: WearInfo_SN (0x210112 = ExpirationItem_SN)
 const SN_COMPLETE      = 0x00210121;
 const SA_LOBBY_ENTER   = 0x00230112;
 const SN_LICENSE_INFO  = 0x00260101;   // must be sent before SN_COMPLETE / lobby enter
 const { MAX_MECH_COUNT, MAX_SLOT_COUNT } = require('../datatypes/enums');
 
-const ACCOUNT_LEVEL_STR = { 1: '1\0', 2: '2\0', 3: '3\0', 4: '4\0' };
-const BODY_CACHE_INDEX_BY_ITEM_ID = {
-    11100101: 84,
-    12100101: 97,
-    13100101: 110,
-    14200101: 123,
-    14300101: 130,
-    15200101: 136,
-    16200101: 149,
-    17100101: 162,
-    18100101: 175,
-};
+function getExactMessageBuffer(type, bodySize) {
+    const msg = Buffer.alloc(0x10 + bodySize);
+    msg.writeUint16BE(msg.length, 0x6);
+    msg.writeUint32BE(type, 0xC);
+    return [msg, msg.subarray(0x10)];
+}
+
+const ACCOUNT_LEVEL_STR = { 0: '0\0', 1: '1\0', 2: '2\0', 3: '3\0', 4: '4\0' };
+
+const cacheIndex = require('./cache-index');
 
 module.exports =
 class ZGameLoginDispatch
@@ -48,12 +57,10 @@ class ZGameLoginDispatch
         switch (type)
         {
             case CQ_GAME_LOGIN:
-                this.handleGameLogin(client, body);
-                return true;
+                return this.handleGameLogin(client, body).then(() => true);
 
             case 0x00220111:
-                this.handleChannelEnter(client, body);
-                return true;
+                return this.handleChannelEnter(client, body).then(() => true);
 
             default:
                 return false;
@@ -65,31 +72,26 @@ class ZGameLoginDispatch
         try {
             console.log(`[ZGameLoginDispatch] >> Game server login request`);
 
-            // SA_GAME_LOGIN - success
-            {
-                const [msg, respBody] = client.getMessageBuffer(SA_GAME_LOGIN, 0x6);
-                respBody.writeUint16LE(0x0000, 0);
-                respBody.writeUint32LE(0x0000, 2);
-                client.send(msg);
-            }
+            if (body.length < 8) { client.disconnect(); return; }
+            const accountId = authTokens.lookup(body.readUInt32LE(0), body.readUInt32LE(4));
+            if (accountId === null) { client.disconnect(); return; }
+            const account = await db.getAccountById(accountId);
+            if (!account || !whitelist.isAllowed(account.username)) { client.disconnect(); return; }
+            let tutorials = [];
+            const [loginMsg, loginBody] = client.getMessageBuffer(SA_GAME_LOGIN, 0x6);
+            loginBody.writeUInt16LE(0, 0);
+            loginBody.writeUInt32LE(0, 2);
+            client.send(loginMsg);
 
-            // Load the most recently logged-in account
-            // The game server is a separate TCP connection from the dispatch server,
-            // Use last_login to find who just authenticated.
-            let account = null;
-            let tutorials = [];   // declared here so SN_COMPLETE can always access it
             {
-                const [rows] = await db.pool.execute(
-                    'SELECT * FROM accounts ORDER BY last_login DESC LIMIT 1'
-                );
-                if (rows.length > 0) account = rows[0];
-            }
-
-            if (account) {
                 // Store account info on the client for other dispatchers
                 client.accountId_ = account.id;
                 client.nickname_ = account.nickname;
+                client.username_ = account.username;
                 client.pilot_ = Number(account.pilot) || 101;
+                client.point_ = clampMoney(account.point, 100000);
+                client.cash_ = clampMoney(account.cash, 0);
+                client.coupon_ = clampMoney(account.coupon, 0);
 
                 const [record, mechLevels, dbItems, licenses, tutorialsResult] = await Promise.all([
                     db.getRecord(account.id),
@@ -129,23 +131,30 @@ class ZGameLoginDispatch
                 // SN_RECORD_INFO — corrected field layout from DLL analysis
                 if (record) {
                     const [msg, respBody] = client.getMessageBuffer(SN_RECORD_INFO, 0x60);
-                    for (let i = 0; i < 0x60; i += 4) respBody.writeUint32LE(0, i);
-                    respBody.writeUint32LE(record.level, 0x00);
-                    respBody.writeUint32LE(record.wins, 0x14);
-                    respBody.writeUint32LE(record.draws, 0x18);
-                    respBody.writeUint32LE(record.losses, 0x1C);
-                    respBody.writeUint32LE(record.kills, 0x20);
-                    respBody.writeUint32LE(record.deaths, 0x24);
-                    respBody.writeBigUint64LE(BigInt(record.exp), 0x40);
-                    respBody.writeBigUint64LE(BigInt(record.exp_max), 0x48);
+                    writeRecordInfoBody(respBody, {
+                        level: record.level,
+                        coupon: account.coupon,
+                        point: account.point,
+                        wins: record.wins,
+                        draws: record.draws,
+                        losses: record.losses,
+                        kills: record.kills,
+                        deaths: record.deaths,
+                        exp: record.exp,
+                    });
                     client.send(msg);
                 }
 
                 // SN_GRADE_INFO (value=11 → grade 1)
                 {
-                    const [msg, respBody] = client.getMessageBuffer(SN_GRADE_INFO, 4);
-                    respBody.writeUInt32LE(11, 0);
-                    client.send(msg);
+                    const gradeValue = 0;
+                    if (gradeValue !== 0) {
+                        console.error(`[ZGameLoginDispatch] !! Grade_Info_SN assertion failed: value=${gradeValue}, must be 0 -- refusing to send`);
+                    } else {
+                        const [msg, respBody] = client.getMessageBuffer(SN_GRADE_INFO, 4);
+                        respBody.writeUInt32LE(gradeValue, 0);
+                        client.send(msg);
+                    }
                 }
 
                 // SN_MECH_LEVEL — DLL reads u8 count, then 28-byte entries
@@ -166,37 +175,11 @@ class ZGameLoginDispatch
                     client.send(msg);
                 }
 
-
-                // SN_ITEM_INFO — equipment only. Body rows disconnect in
-                // ItemInfo_SN/Item_Add and are only referenced by WearInfo.
-                {
-                    const ITEM_RECORD_SIZE = 35;
-                    const headerSize = 6;
-                    const [msg, respBody] = client.getMessageBuffer(0x00210111, headerSize + (ITEM_RECORD_SIZE * equipmentItems.length));
-                    respBody.writeUint8(1, 0);                         // SuccessFlag
-                    respBody.writeUint8(equipmentItems.length, 1);      // ItemCount
-                    respBody.writeUint32LE(account.id || 0, 2);        // AccountKey
-                    let offset = headerSize;
-                    for (const item of equipmentItems) {
-                        respBody.writeUint32LE(item.id || 0, offset);
-                        respBody.writeUint32LE(item.item_id, offset + 0x04);
-                        respBody.writeUint32LE(item.equipped ? 1 : 0, offset + 0x08);
-                        respBody.writeUint32LE(0, offset + 0x0C);
-                        respBody.writeUint16LE(item.mech_type || 0, offset + 0x10);
-                        respBody.writeUint32LE(item.part_slot || 0, offset + 0x12);
-                        respBody.writeUint8(item.equipped ? 2 : 0, offset + 0x16);  // use type: 2=equipment
-                        respBody.writeUint32LE(item.quantity || 1, offset + 0x17);
-                        respBody.writeUint32LE(0xFFFFFFFF, offset + 0x1B);         // expiration = permanent
-                        respBody.writeUint32LE(0xFFFFFFFF, offset + 0x1F);         // expiration2 = permanent
-                        offset += ITEM_RECORD_SIZE;
-                    }
-                    client.send(msg);
-                    console.log(`[ZGameLoginDispatch] >> Sent SN_ITEM_INFO: ${equipmentItems.length} items (equipment only)`);
-                }
+                await require('./item-info.sender').sendItemInfo(client, items, account.id, 'gamelogin');
 
                 // SN_WEAR_INFO (0x210113) — DLL: WearInfo_SN
                 // Header: [u8 suc][u8 cnt][u32 pilotSerialIndex][u32 pilotItemIndex][u32 selectedMechType]
-                // Entry (52 bytes): [u32 mechType] + 6 x [u32 serialIndex, u32 itemIndex]
+
                 // Slot 0=Mech(body), 1=MainWeapon, 2=LeftWeapon, 3=RightWeapon, 4=Equipment, 5=Skin
                 {
                     const ENTRY_SIZE = 52;
@@ -208,14 +191,19 @@ class ZGameLoginDispatch
                         mechSlots[m] = Array.from({length: 6}, () => ({uniqueKey: 0, itemIndex: 0}));
                     }
 
+                    const wearItems = await db.getItemsWithEquipViews(account.id);
+
                     // All items: slot 0 = body/chassis, slots 1-5 = weapons/equipment
-                    for (const item of items) {
+                    for (const item of wearItems) {
                         if (item.equipped && item.mech_type >= 1 && item.mech_type <= MAX_MECH_COUNT) {
                             const slot = Number(item.part_slot);
                             if (slot >= 0 && slot < 6 && mechSlots[item.mech_type]) {
+                                const rawId = Number(item.item_id) || 0;
+                                const girIndex = null;
+                                const itemIndex = girIndex != null ? girIndex : rawId;
                                 mechSlots[item.mech_type][slot] = {
                                     uniqueKey: item.id || 0,
-                                    itemIndex: item.item_id || 0,
+                                    itemIndex: itemIndex,
                                 };
                             }
                         }
@@ -239,8 +227,8 @@ class ZGameLoginDispatch
                         for (const entry of mechEntries) {
                             respBody.writeUint32LE(entry.mechType, offset);
                             for (let s = 0; s < 6; s++) {
-                                respBody.writeUint32LE(entry.slots[s].uniqueKey, offset + 4 + s * 8);
-                                respBody.writeUint32LE(entry.slots[s].itemIndex, offset + 4 + s * 8 + 4);
+                                respBody.writeUint32LE(entry.slots[s].itemIndex, offset + 4 + s * 8);
+                                respBody.writeUint32LE(entry.slots[s].uniqueKey, offset + 8 + s * 8);
                             }
                             offset += ENTRY_SIZE;
                         }
@@ -270,65 +258,15 @@ class ZGameLoginDispatch
                     console.log(`[ZGameLoginDispatch] >> Sent SN_LICENSE_INFO: ${licList.length} licenses`);
                 }
 
+                {
+                    const dbMaps = await db.getMaps(account.id);
+                    const fallbackIds = dbMaps.map((map) => map.map_id);
+                    sendMapInfoSN(client, resolveRealMapIds() || fallbackIds);
+                    console.log(`[ZGameLoginDispatch] >> Sent SN_MAP_INFO (mapInfoOnGameLoginMode): ${(resolveRealMapIds() || fallbackIds).length} maps`);
+                }
+
                 console.log(`[ZGameLoginDispatch] >> Sent DB account data for "${account.nickname}"`);
 
-            } else {
-                // No DB record — fallback to minimal data so the client doesn't hang
-                console.log(`[ZGameLoginDispatch] >> No DB account found, sending defaults`);
-                client.nickname_ = 'Player';
-
-                {
-                    const [msg, respBody] = client.getMessageBuffer(SN_DEFAULT_INFO, 0x1b);
-                    respBody.write('4\0', 0);
-                    respBody.write('Player\0', 2);
-                    client.send(msg);
-                }
-
-                // SN_PLAY_INFO (critical for room creation)
-                {
-                    const [msg, respBody] = client.getMessageBuffer(0x00210102, 0x16);
-                    respBody.writeUint32LE(0, 0); respBody.writeUint32LE(0, 4);
-                    respBody.writeUint8(0, 8); respBody.writeUint8(1, 9);
-                    respBody.writeInt32LE(1, 0x0A); respBody.writeUint16LE(1, 0x0E);
-                    respBody.writeUint16LE(0, 0x10); respBody.writeInt32LE(0, 0x12);
-                    client.send(msg);
-                }
-
-                {
-                    const [msg, respBody] = client.getMessageBuffer(SN_RECORD_INFO, 0x60);
-                    respBody.writeUint32LE(1, 0);
-                    client.send(msg);
-                }
-
-                // SN_GRADE_INFO (value=11 → grade 1)
-                {
-                    const [msg, respBody] = client.getMessageBuffer(SN_GRADE_INFO, 4);
-                    respBody.writeUInt32LE(11, 0);
-                    client.send(msg);
-                }
-
-                {
-                    const MAX_NUM_MECHS = 8;
-                    const MECH_RECORD_SIZE = 0x1c;
-                    const [msg, respBody] = client.getMessageBuffer(SN_MECH_LEVEL, 1 + (MECH_RECORD_SIZE * MAX_NUM_MECHS));
-                    respBody.writeUint8(MAX_NUM_MECHS, 0);
-                    let offset = 1;
-                    for (let i = 0; i < MAX_NUM_MECHS; ++i) {
-                        respBody.writeUint32LE(i + 1, offset);
-                        respBody.writeUint32LE(1, offset + 4);
-                        offset += MECH_RECORD_SIZE;
-                    }
-                    client.send(msg);
-                }
-
-                // SN_ITEM_INFO (empty inventory — correct header format)
-                {
-                    const [msg, respBody] = client.getMessageBuffer(0x00210111, 0x6);
-                    respBody.writeUint8(1, 0);      // SuccessFlag
-                    respBody.writeUint8(0, 1);      // ItemCount = 0
-                    respBody.writeUint32LE(0, 2);   // AccountKey
-                    client.send(msg);
-                }
             }
 
             // SN_COMPLETE
@@ -355,52 +293,8 @@ class ZGameLoginDispatch
             console.log(`[ZGameLoginDispatch] >> Sent account data + lobby enter`);
 
         } catch (err) {
-            console.error(`[ZGameLoginDispatch] >> DB Error:`, err.message);
-            //Send minimal hardcoded data to prevent crash
-            {
-                const [msg, respBody] = client.getMessageBuffer(SN_DEFAULT_INFO, 0x1b);
-                respBody.write('4\0', 0);
-                respBody.write('Player\0', 2);
-                client.send(msg);
-            }
-            {
-                const [msg, respBody] = client.getMessageBuffer(0x00210102, 0x16);
-                respBody.writeUint32LE(0, 0); respBody.writeUint32LE(0, 4);
-                respBody.writeUint8(0, 8); respBody.writeUint8(1, 9);
-                respBody.writeInt32LE(1, 0x0A); respBody.writeUint16LE(1, 0x0E);
-                respBody.writeUint16LE(0, 0x10); respBody.writeInt32LE(0, 0x12);
-                client.send(msg);
-            }
-            {
-                const [msg, respBody] = client.getMessageBuffer(SN_RECORD_INFO, 0x60);
-                respBody.writeUint32LE(1, 0);
-                client.send(msg);
-            }
-            // SN_GRADE_INFO (value=11 → grade 1)
-            {
-                const [msg, respBody] = client.getMessageBuffer(SN_GRADE_INFO, 4);
-                respBody.writeUInt32LE(11, 0);
-                client.send(msg);
-            }
-            {
-                const [msg, respBody] = client.getMessageBuffer(0x00210111, 0x6);
-                respBody.writeUint8(1, 0);      // SuccessFlag
-                respBody.writeUint8(0, 1);      // ItemCount = 0
-                respBody.writeUint32LE(0, 2);   // AccountKey
-                client.send(msg);
-            }
-            {
-                const [msg, respBody] = client.getMessageBuffer(SN_COMPLETE, 0x100);
-                respBody.writeUint16LE(0x0000, 0);
-                respBody.writeInt32LE(0x0000, 2);
-                client.send(msg);
-            }
-            {
-                const [msg, respBody] = client.getMessageBuffer(SA_LOBBY_ENTER, 0x6);
-                respBody.writeUint16LE(0x0000, 0);
-                respBody.writeUint32LE(0x0000, 2);
-                client.send(msg);
-            }
+            console.error('[ZGameLoginDispatch] Login failed:', err.message);
+            client.disconnect();
         }
     }
 
@@ -424,11 +318,19 @@ class ZGameLoginDispatch
         }
 
         {
-            const [msg, respBody] = client.getMessageBuffer(SN_GRADE_INFO, 4);
-            respBody.writeUInt32LE(11, 0);
-            client.send(msg);
-            console.log(`[ZGameLoginDispatch] >> Sent SN_GRADE_INFO: value=11 (grade=1)`);
+            const gradeValue = 0;
+            if (gradeValue !== 0) {
+                console.error(`[ZGameLoginDispatch] !! Grade_Info_SN assertion failed: value=${gradeValue}, must be 0 -- refusing to send`);
+            } else {
+                const [msg, respBody] = client.getMessageBuffer(SN_GRADE_INFO, 4);
+                respBody.writeUInt32LE(gradeValue, 0);
+                client.send(msg);
+                console.log(`[ZGameLoginDispatch] >> Sent SN_GRADE_INFO: value=0 (normal)`);
+            }
         }
 
+        {
+            sendFullRoomList(client, rooms.listRooms(), getExactMessageBuffer);
+        }
     }
 };

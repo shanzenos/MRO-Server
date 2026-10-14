@@ -1,5 +1,5 @@
 const mysql = require('mysql2/promise');
-const path = require('path');
+const { getShareType } = require('./item-share-type');
 
 // Load DB config from config.json (editable per-machine)
 let dbConfig = { host: '127.0.0.1', port: 3306, user: 'root', password: '', database: 'mro' };
@@ -16,13 +16,26 @@ const pool = mysql.createPool({
     ...dbConfig,
     waitForConnections: true,
     connectionLimit: 10,
+
+    timezone: 'Z',
 });
 
-/**
- * Find an account by username. Returns null if not found.
- * @param {string} username
- * @returns {Promise<object|null>}
- */
+async function verifyConnection()
+{
+    let conn;
+    try {
+        conn = await pool.getConnection();
+        await conn.query('SELECT point, cash, coupon FROM accounts LIMIT 0');
+        await conn.query('SELECT account_id, item_id, mech_slot, part_slot FROM item_equips LIMIT 0');
+    } catch (err) {
+        console.error(`[DB] FATAL: cannot connect to MySQL at ${dbConfig.user}@${dbConfig.host}:${dbConfig.port}/${dbConfig.database}`);
+        console.error(`[DB] mysql2 error: ${err && err.code || err && err.message || err}`);
+        throw err;
+    } finally {
+        if (conn) conn.release();
+    }
+}
+
 async function getAccountByUsername(username)
 {
     const [rows] = await pool.execute(
@@ -31,11 +44,6 @@ async function getAccountByUsername(username)
     return rows.length > 0 ? rows[0] : null;
 }
 
-/**
- * Find an account by nickname. Returns null if not found.
- * @param {string} nickname
- * @returns {Promise<object|null>}
- */
 async function getAccountByNickname(nickname)
 {
     const [rows] = await pool.execute(
@@ -44,11 +52,14 @@ async function getAccountByNickname(nickname)
     return rows.length > 0 ? rows[0] : null;
 }
 
-/**
- * Get player record (level, W/L/K/D stats).
- * @param {number} accountId
- * @returns {Promise<object|null>}
- */
+async function getAccountById(accountId)
+{
+    const [rows] = await pool.execute(
+        'SELECT * FROM accounts WHERE id = ?', [accountId]
+    );
+    return rows.length > 0 ? rows[0] : null;
+}
+
 async function getRecord(accountId)
 {
     const [rows] = await pool.execute(
@@ -57,11 +68,6 @@ async function getRecord(accountId)
     return rows.length > 0 ? rows[0] : null;
 }
 
-/**
- * Get all mech levels for an account.
- * @param {number} accountId
- * @returns {Promise<object[]>}
- */
 async function getMechLevels(accountId)
 {
     const [rows] = await pool.execute(
@@ -70,11 +76,6 @@ async function getMechLevels(accountId)
     return rows;
 }
 
-/**
- * Get all mech licenses for an account.
- * @param {number} accountId
- * @returns {Promise<object[]>}
- */
 async function getMechLicenses(accountId)
 {
     const [rows] = await pool.execute(
@@ -83,11 +84,6 @@ async function getMechLicenses(accountId)
     return rows;
 }
 
-/**
- * Get unlocked maps for an account.
- * @param {number} accountId
- * @returns {Promise<object[]>}
- */
 async function getMaps(accountId)
 {
     const [rows] = await pool.execute(
@@ -96,11 +92,6 @@ async function getMaps(accountId)
     return rows;
 }
 
-/**
- * Get tutorials for an account.
- * @param {number} accountId
- * @returns {Promise<object[]>}
- */
 async function getTutorials(accountId)
 {
     const [rows] = await pool.execute(
@@ -109,11 +100,6 @@ async function getTutorials(accountId)
     return rows;
 }
 
-/**
- * Get items for an account.
- * @param {number} accountId
- * @returns {Promise<object[]>}
- */
 async function getItems(accountId)
 {
     const [rows] = await pool.execute(
@@ -122,13 +108,104 @@ async function getItems(accountId)
     return rows;
 }
 
-/**
- * Create a new player account with all default data.
- * @param {string} username
- * @param {string} nickname
- * @param {number} pilot - 101 or 102
- * @returns {Promise<number>} - The new account ID
- */
+async function getItemEquips(accountId)
+{
+    const [rows] = await pool.execute(
+        'SELECT * FROM item_equips WHERE account_id = ? ORDER BY id', [accountId]
+    );
+    return rows;
+}
+
+async function getItemsWithEquipViews(accountId)
+{
+    const items = await getItems(accountId);
+
+    const equips = await getItemEquips(accountId);
+    const byId = new Map(items.map(item => [Number(item.id), item]));
+    const views = items.map(item => ({ ...item, equipped: 0 }));
+    for (const equip of equips) {
+        const base = byId.get(Number(equip.item_id));
+        if (!base) continue;
+        views.push({
+            ...base,
+            mech_type: Number(equip.mech_slot),
+            part_slot: Number(equip.part_slot),
+            equipped: 1,
+        });
+    }
+    return views;
+}
+
+async function saveEquippedLoadout(accountId, mechType, serials)
+{
+    if (!Number.isInteger(Number(accountId)) || Number(accountId) <= 0) {
+        throw new Error('invalid account id');
+    }
+    if (!Number.isInteger(Number(mechType)) || Number(mechType) < 1 || Number(mechType) > 8) {
+        throw new Error(`invalid mech slot: ${mechType}`);
+    }
+    if (!Array.isArray(serials) || serials.length !== 6 || serials.some(serial =>
+        !Number.isInteger(Number(serial)) || Number(serial) < 0 || Number(serial) > 0xFFFFFFFF
+    )) {
+        throw new Error('invalid equipped serial list');
+    }
+
+    const selectedSerials = serials.filter(serial => Number(serial) !== 0).map(Number);
+    const uniqueSerials = [...new Set(selectedSerials)];
+    if (uniqueSerials.length !== selectedSerials.length) {
+        throw new Error('duplicate equipped serial');
+    }
+
+    const conn = await pool.getConnection();
+    try {
+        await conn.beginTransaction();
+
+        await conn.execute('SELECT id FROM accounts WHERE id = ? FOR UPDATE', [accountId]);
+        const itemIdBySerial = new Map();
+        if (uniqueSerials.length > 0) {
+            const placeholders = uniqueSerials.map(() => '?').join(', ');
+            const [rows] = await conn.execute(
+                `SELECT id, item_id FROM items WHERE account_id = ? AND id IN (${placeholders})`,
+                [accountId, ...uniqueSerials]
+            );
+            const found = new Set(rows.map(row => Number(row.id)));
+            if (uniqueSerials.some(serial => !found.has(serial))) {
+                throw new Error('equipped serial is not owned by account');
+            }
+            for (const row of rows) itemIdBySerial.set(Number(row.id), Number(row.item_id));
+        }
+
+        {
+            await conn.execute(
+                'DELETE FROM item_equips WHERE account_id = ? AND mech_slot = ?',
+                [accountId, mechType]
+            );
+            for (let partSlot = 0; partSlot < serials.length; partSlot++) {
+                const serial = Number(serials[partSlot]);
+                if (serial === 0) continue;
+                const itemId = itemIdBySerial.get(serial);
+                if (getShareType(itemId) === 0) {
+                    await conn.execute(
+                        'DELETE FROM item_equips WHERE account_id = ? AND item_id = ?',
+                        [accountId, serial]
+                    );
+                }
+                await conn.execute(
+                    'INSERT INTO item_equips (account_id, item_id, mech_slot, part_slot) VALUES (?, ?, ?, ?)',
+                    [accountId, serial, mechType, partSlot]
+                );
+            }
+        }
+
+        await conn.commit();
+    } catch (err) {
+        await conn.rollback();
+        throw err;
+    } finally {
+        conn.release();
+    }
+}
+
 async function createAccount(username, nickname, pilot)
 {
     const conn = await pool.getConnection();
@@ -187,57 +264,64 @@ async function createAccount(username, nickname, pilot)
         //
         // Mech types: 1=Light(SA), 2=Assault(AA), 3=Medium(HA), 4=Sniper(NB),
         //   5=Firepower(TB), 6=Engineer(BB), 7=Maintenance(EA), 8=Observation(OA)
-        const starterLoadouts = [
-             // 기체 바디 (part_slot=0, slot=0) (mech body)
-            [1, 0, 11200101],  // 소형 (light)
-            [2, 0, 12200101],  // 강습 (assault)
-            [3, 0, 13200101],  // 중형 (medium)
-            [4, 0, 14300101],  // 저격 (sniper)
-            [5, 0, 15300101],  // 화력 (firepower)
-            [6, 0, 16300101],  // 공병 (engineer)
-            [7, 0, 17200101],  // 정비 (maintenance)
-            [8, 0, 18200101],  // 관측 (observation)
 
-            // [mech_type, part_slot, item_id]
-            // Mech 1 - Light
-            [1, 1, 21100101],  // MOC_a Smoothbore gun
-            [1, 2, 31100101],  // AOC_a Auxiliary single gun
-            [1, 4, 41100101],  // BPE_a Plasma thrusters
-            // Mech 2 - Assault
-            [2, 1, 22100101],  // MOM_a Cannon
-            [2, 2, 32100101],  // AOM_a Secondary guns
-            [2, 4, 41200101],  // BHE_a Hydrogen booster
-            // Mech 3 - Medium/Reload
-            [3, 1, 21200101],  // MNC_a Multi-column smoothbore
-            [3, 2, 33100101],  // AOR_a Watch missile
-            [3, 4, 41300101],  // BNE_a Nano-propeller
-            // Mech 4 - Sniper
-            [4, 1, 24100101],  // MSC_a Sniper rifle
-            [4, 2, 31100201],  // AOC_b Auxiliary single gun
-            [4, 4, 41100101],  // BPE_a Plasma thrusters
-            // Mech 5 - Firepower
-            [5, 1, 25100101],  // MLH_a Anti-aircraft fire
-            [5, 2, 35100101],  // ACH_a Grenade transmitter
-            [5, 4, 41200101],  // BHE_a Hydrogen booster
-            // Mech 6 - Engineer
-            [6, 1, 28100101],  // MAT_a Fort setting machine
-            [6, 2, 43100101],  // ABA_a Construction equipment
-            [6, 4, 42100101],  // ADA_a Repair robot
-            // Mech 7 - Maintenance
-            [7, 1, 26500101],  // MHA_a Close range weapon
-            [7, 2, 38500301],  // ATA_a Trap setting machine
-            [7, 4, 41300101],  // BNE_a Nano-propeller
-            // Mech 8 - Observation
-            [8, 1, 28300101],  // MPF_a Remote detection
-            [8, 2, 39100101],  // AEF_a EMP
-            [8, 4, 41100101],  // BPE_a Plasma thrusters
+        // [mech_type, part_slot, item_id]
+
+        const starterLoadouts = [
+
+            [1, 0, 11100101],
+            [1, 1, 22100101],
+            [1, 2, 32100101],
+            [1, 4, 41100101],
+
+            [2, 0, 12100101],
+            [2, 1, 26300101],
+            [2, 2, 32100101],
+            [2, 4, 41100101],
+
+            [3, 0, 13100101],
+            [3, 1, 21200101],
+            [3, 2, 32100101],
+            [3, 4, 41100101],
+
+            [4, 0, 14200101],
+            [4, 1, 24100201],
+            [4, 2, 32100101],
+
+            [5, 0, 15200101],
+            [5, 1, 22200201],
+            [5, 2, 32100101],
+
+            [6, 0, 16200101],
+            [6, 1, 25300101],
+            [6, 2, 38500101],
+            [6, 4, 43100101],
+
+            [7, 0, 17100101],
+            [7, 1, 28100101],
+            [7, 2, 31100101],
+            [7, 4, 42100101],
+
+            [8, 0, 18100101],
+            [8, 1, 28300101],
+            [8, 2, 39100101],
+            [8, 4, 41100101],
         ];
 
-        for (const [mechType, partSlot, itemId] of starterLoadouts) {
-            await conn.execute(
-                'INSERT INTO items (account_id, item_id, slot, mech_type, part_slot, quantity, equipped) VALUES (?, ?, ?, ?, ?, 1, 1)',
-                [accountId, itemId, partSlot, mechType, partSlot]
-            );
+        {
+            for (const [mechType, partSlot, itemId] of starterLoadouts) {
+                const [result] = await conn.execute(
+                    'INSERT INTO items (account_id, item_id, slot, mech_type, part_slot, quantity, equipped) VALUES (?, ?, ?, ?, ?, 1, 1)',
+                    [accountId, itemId, partSlot, mechType, partSlot]
+                );
+
+                {
+                    await conn.execute(
+                        'INSERT INTO item_equips (account_id, item_id, mech_slot, part_slot) VALUES (?, ?, ?, ?)',
+                        [accountId, result.insertId, mechType, partSlot]
+                    );
+                }
+            }
         }
 
         await conn.commit();
@@ -250,11 +334,6 @@ async function createAccount(username, nickname, pilot)
     }
 }
 
-/**
- * Mark a tutorial as completed.
- * @param {number} accountId
- * @param {number} tutorialId
- */
 async function completeTutorial(accountId, tutorialId)
 {
     await pool.execute(
@@ -263,10 +342,6 @@ async function completeTutorial(accountId, tutorialId)
     );
 }
 
-/**
- * Update last_login timestamp.
- * @param {number} accountId
- */
 async function updateLastLogin(accountId)
 {
     await pool.execute(
@@ -294,18 +369,4 @@ async function getItemCatalog()
     return rows;
 }
 
-module.exports = {
-    pool,
-    getAccountByUsername,
-    getAccountByNickname,
-    getRecord,
-    getMechLevels,
-    getMechLicenses,
-    getMaps,
-    getTutorials,
-    getItems,
-    getItemCatalog,
-    createAccount,
-    completeTutorial,
-    updateLastLogin,
-};
+module.exports = { pool, verifyConnection, getAccountByUsername, getAccountByNickname, getAccountById, getRecord, getMechLevels, getMechLicenses, getMaps, getTutorials, getItems, getItemEquips, getItemsWithEquipViews, getItemCatalog, createAccount, saveEquippedLoadout, completeTutorial, updateLastLogin };

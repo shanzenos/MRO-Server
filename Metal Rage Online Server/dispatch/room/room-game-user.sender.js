@@ -1,9 +1,9 @@
 const db = require('../../database/db');
+const { CANONICAL_LOADOUTS } = require('../../database/default-loadouts');
 
-const SN_GAME_USER = 0x00230111;
+const SN_GAME_USER = 0x00222112;
 const GAME_USER_RECORD_SIZE = 0x01E5;
 const GAME_USER_HEADER_SIZE = 0x02;
-// rec+0x6C = socketCount, rec+0x6D = first socket (stride 0x2F, 8 sockets = 0x1E5 tail)
 const GAME_USER_SOCKET_OFFSET = 0x6D;
 const GAME_USER_SOCKET_SIZE = 0x2F;
 
@@ -20,14 +20,7 @@ function equippedBySlot(items, mechType, partSlot) {
     );
 }
 
-async function sendGameUserBootstrap(client, ctx, getExactMessageBuffer) {
-    if (!client.campaignRoom_) {
-        return;
-    }
-    if (client.gameUserBootstrapSent_) {
-        console.log('[ZRoomDispatch] >> Skipped Game_User_SN 0x230111 (already sent)');
-        return;
-    }
+async function sendGameUserBootstrap(client, ctx, getExactMessageBuffer, opts) {
 
     const {
         accountIndex,
@@ -38,22 +31,24 @@ async function sendGameUserBootstrap(client, ctx, getExactMessageBuffer) {
         pilotId,
     } = ctx;
 
+    if (teamIndex !== 0 && teamIndex !== 1) {
+        console.error(`[ZRoomDispatch] !! Game_User_SN assertion failed: teamIndex=${teamIndex} is not 0/1 (accountIndex=${accountIndex}) -- refusing to send`);
+        return;
+    }
+
+    const targetClient = (opts && opts.sendTo) || client;
+    const itemsAccountId = (opts && opts.itemsAccountId !== undefined) ? opts.itemsAccountId : client.accountId_;
+
     let items = [];
-    if (client.accountId_) {
+    if (itemsAccountId) {
         try {
-            items = await db.getItems(client.accountId_);
+            items = await db.getItemsWithEquipViews(itemsAccountId);
         } catch (err) {
             console.error(`[ZRoomDispatch] >> Game_User_SN item lookup failed: ${err.message}`);
         }
     }
 
     const mechType = Math.max(Number(selectedMech) || 1, 1);
-    const bodyItem = equippedBySlot(items, mechType, 0);
-    const mainItem = equippedBySlot(items, mechType, 1);
-    const leftItem = equippedBySlot(items, mechType, 2);
-    const rightItem = equippedBySlot(items, mechType, 3);
-    const equipmentItem = equippedBySlot(items, mechType, 4);
-    const skinItem = equippedBySlot(items, mechType, 5);
 
     const [msg, body] = getExactMessageBuffer(SN_GAME_USER, GAME_USER_HEADER_SIZE + GAME_USER_RECORD_SIZE);
     body.writeUint8(0, 0x00);
@@ -83,37 +78,52 @@ async function sendGameUserBootstrap(client, ctx, getExactMessageBuffer) {
     // rec+0x37: asciiz[0x19] clan name
     writeCString(body, '', rec + 0x37, 0x19);
 
-    // rec+0x50-0x6B: Game_Item_Add bonus/stats fields (all 0 = no bonus)
-    // rec+0x6C: socketCount byte
-    body.writeUint8(1, rec + 0x6C);
+    const pveExtraLives = 0;
+    body.writeUint32LE(pveExtraLives, rec + 0x64);
 
-    // Socket 0: rec+0x6D (socket+0x00..0x2E)
-    const socket = rec + GAME_USER_SOCKET_OFFSET;
-    // socket+0x00: u32 raw slot/mech selector (1..7 → 0..6; mechType=1 → slot 0)
-    body.writeUint32LE(mechType, socket + 0x00);
-    // socket+0x04: u32 body item
-    body.writeUint32LE(Number(bodyItem && bodyItem.item_id) || mechType, socket + 0x04);
-    // socket+0x08: u8 state/user-socket field
-    body.writeUint8(0, socket + 0x08);
-    // socket+0x09-0x14: unknown (zeros, left as buffer default)
-    // socket+0x15: u32 main weapon
-    body.writeUint32LE(Number(mainItem && mainItem.item_id) || 0, socket + 0x15);
-    // socket+0x19: u32 left weapon
-    body.writeUint32LE(Number(leftItem && leftItem.item_id) || 0, socket + 0x19);
-    // socket+0x1D: u32 right weapon
-    body.writeUint32LE(Number(rightItem && rightItem.item_id) || 0, socket + 0x1D);
-    // socket+0x21: u32 equipment
-    body.writeUint32LE(Number(equipmentItem && equipmentItem.item_id) || 0, socket + 0x21);
-    // socket+0x25: u32 skin
-    body.writeUint32LE(Number(skinItem && skinItem.item_id) || 0, socket + 0x25);
-    // socket+0x29-0x2E: padding (zeros)
+    const SLOT_COUNT = 8;
+    const SLOT_RECORD_SIZE = 0x2F;
+    body.writeUint8(SLOT_COUNT, rec + 0x6C);
 
-    client.send(msg);
-    client.gameUserBootstrapSent_ = true;
+    const summary = [];
+    for (let slotNo = 1; slotNo <= SLOT_COUNT; slotNo++) {
+        const socket = rec + GAME_USER_SOCKET_OFFSET + (slotNo - 1) * SLOT_RECORD_SIZE;
+        const def = CANONICAL_LOADOUTS[slotNo] || CANONICAL_LOADOUTS[1];
+        const bodyItem = equippedBySlot(items, slotNo, 0);
+        const mainItem = equippedBySlot(items, slotNo, 1);
+        const leftItem = equippedBySlot(items, slotNo, 2);
+        const rightItem = equippedBySlot(items, slotNo, 3);
+        const equipmentItem = equippedBySlot(items, slotNo, 4);
+        const skinItem = equippedBySlot(items, slotNo, 5);
+        const bodyId = Number(bodyItem && bodyItem.item_id) || def.body;
+        const mainId = Number(mainItem && mainItem.item_id) || def.main;
+        const leftId = Number(leftItem && leftItem.item_id) || def.left;
+
+        const rightId = rightItem ? Number(rightItem.item_id) || 0 : def.right;
+        const boosterId = equipmentItem ? Number(equipmentItem.item_id) || 0 : def.booster;
+        const skinId = skinItem ? Number(skinItem.item_id) || 0 : def.skin;
+
+        body.writeUint32LE(slotNo, socket + 0x00);
+
+        body.writeUint32LE(bodyId, socket + 0x04);
+
+        body.writeUint8(0, socket + 0x08);
+
+        body.writeUint32LE(mainId, socket + 0x15);
+        body.writeUint32LE(leftId, socket + 0x19);
+        body.writeUint32LE(rightId, socket + 0x1D);
+        body.writeUint32LE(boosterId, socket + 0x21);
+        body.writeUint32LE(skinId, socket + 0x25);
+        summary.push(`${slotNo}:${bodyId}/${mainId}`);
+    }
+
+    targetClient.send(msg);
+    targetClient.gameUserBootstrapSent_ = true;
     console.log(
-        `[ZRoomDispatch] >> Sent Game_User_SN 0x230111 ` +
-        `(userIndex=${accountIndex}, team=${teamIndex}, selectedMech=${mechType}, ` +
-        `body=${Number(bodyItem && bodyItem.item_id) || 0}, main=${Number(mainItem && mainItem.item_id) || 0})`
+        `[ZRoomDispatch] >> Sent Game_User_SN 0x00222112 ` +
+        `(userIndex=${accountIndex}, team=${teamIndex}, selectedMech=${mechType}, slots=${summary.join(' ')})` +
+        (pveExtraLives !== 0 ? ` pveExtraLives=${pveExtraLives}` : '') +
+        (targetClient !== client ? ` -> conn=${targetClient.connId_}` : '')
     );
 }
 

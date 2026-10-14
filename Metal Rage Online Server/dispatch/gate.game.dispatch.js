@@ -1,4 +1,22 @@
-﻿const NetworkClient = require("../client");
+const NetworkClient = require("../client");
+
+const { sendGameUserBootstrap } = require('./room/room-game-user.sender');
+
+const rooms = require('../rooms.js');
+
+const { sendRoomStatePackets, sendRoomNameOnly, sendRoomOptionOnly } = require('./room/room-state.sender');
+
+const { sendRoomMapPackets } = require('./room/room-map.sender');
+const { sendRoomUserPackets, buildMemberUserCtx } = require('./room/room-user.sender');
+const { broadcastRoomListChange } = require('./room/room-list.sender');
+
+const { decodeAnsiBytes, decodeBig5ForLog, writeAnsiStringField } = require('./room/room-string');
+
+const { leaveRoomAndNotify } = require('./room/room-leave');
+
+const whitelist = require('../config/whitelist.js');
+
+const { MAP_IDS_PVP } = require('./map-info.sender');
 
 // ZGateGameDispatch - Handles Gate-range (0x22XXXX) messages on the GAME server
 //
@@ -13,25 +31,25 @@
 
 const CQ_CREATE = 0x00220201;
 const SA_LOBBY_CREATE = 0x00220202;
-const MAP_CHANGE_ONE_RESEND_MODE = 'map_only'; // 'full_room' | 'map_only' | 'none'
-const GAME_START_HANDSHAKE_MODE = 'ready_then_start'; // 'start_only' | 'ready_then_start'
-const READY_HOST_GATE_PRIME_MODE = 'enabled'; // 'disabled' | 'enabled'
-const GAME_WAIT_SN_EXPERIMENT_MODE = 'enabled'; // 'disabled' | 'enabled'
-const POST_GAME_WAIT_READY_HOST_MODE = 'enabled'; // 'disabled' | 'enabled'
-const GAME_INFO_SN_EXPERIMENT_MODE = 'enabled'; // 'disabled' | 'enabled'
 
-let nextRoomIndex = 1;
+const CQ_ROOM_NAME_CHANGE = 0x00220218;
+const SA_ROOM_NAME_CHANGE = 0x00220219;
 
-// 0x220221 / 0x220222 experimental body layout (10 bytes total).
-// We do not know the real semantics yet, so keep these as offset-based fields:
-//   [0]    = b0
-//   [1..2] = w1
-//   [3..4] = w2
-//   [5]    = b5
-//   [6..7] = w6
-//   [8..9] = w8
-//
-// Change only one field at a time while testing difficulty buttons.
+const ROOM_DEFAULT_ENTRY_HINTS = [8, 37, 30, 34, 6, 2];
+
+function computeCampaignMapAllHints() {
+    return [9001, 9002, 9003, 9004, 9005, 9006, 9007, 9008, 9009, 9010, 9011, 9012];
+}
+
+const MAP_ID_DEFAULT_CAMPAIGN = 9001;
+
+const MAP_ID_DEFAULT_PVP = 1011;
+
+const ROOM_STATE_RETRY_SCHEDULE = [
+    [350, 'delayed'],
+    [1200, 'retry after scene change'],
+];
+
 const MAP_CHANGE_ONE_SA_EXPERIMENT = {
     mode: 'manual',  // SA에 현재 선택된 맵 캐시키를 반환 (returns the currently selected map cache key in the SA)
     manual: {
@@ -118,21 +136,62 @@ const CACHE_INDEX_TO_MAP_NAME_GG = {
     1: 'Map_Ptuto',
 };
 
+const MAP_ID_TO_MAP_NAME_GG = {
+    9001: 'Map_PC01', 9002: 'Map_PC01', 9003: 'Map_PC01',
+    9004: 'Map_PC03', 9005: 'Map_PC03', 9006: 'Map_PC03',
+    9007: 'Map_PC02', 9008: 'Map_PC02', 9009: 'Map_PC02',
+    9010: 'Map_PC04', 9011: 'Map_PC04', 9012: 'Map_PC04',
+    1011: 'Map_C08', 1021: 'Map_C06', 1031: 'Map_C01',
+    1041: 'Map_N05_de', 1051: 'Desert', 1061: 'Map_N01',
+    1071: 'Map_C20', 1081: 'Map_N17',
+};
+
+function buildReadyHostSnMsg(ip, port, mapCacheKey, ipOnly = false)
+{
+
+    const mapName = MAP_ID_TO_MAP_NAME_GG[mapCacheKey]
+        || CACHE_INDEX_TO_MAP_NAME_GG[mapCacheKey]
+        || 'Map_PC01';
+    // 실제 서버: IP:Port/MapName?team=0 형식으로 ClientTravel (real server: ClientTravel in IP:Port/MapName?team=0 format)
+    // ip 필드에 "IP/MapName" 형식으로 전달 시도 (attempt to pass in "IP/MapName" format in the ip field)
+
+    const ipWithMap = ipOnly ? ip : ip + '/' + mapName;
+    const urlBytes = Buffer.byteLength(ipWithMap, 'ascii');
+    const bodySize = 0x03 + urlBytes + 1;
+
+    const [msg, respBody] = getExactMessageBuffer(0x00420115, bodySize);
+    respBody.writeUInt16LE(port, 0x00);
+    respBody.writeUInt8(0, 0x02);
+
+    const roomForBytes = respBody.length - 0x03;
+    const written = respBody.write(ipWithMap + '\0', 0x03, Math.min(urlBytes + 1, roomForBytes), 'ascii');
+
+    return { msg, ipWithMap, bodySize, written, urlBytes };
+}
+
 function sendReadyHostSn(client)
 {
     const ip = normalizeIpv4(client.socket_ && client.socket_.localAddress);
     const port = 30907;
     const mapCacheKey = Number(client.campaignMapCacheKey_) || 58;
-    const mapName = CACHE_INDEX_TO_MAP_NAME_GG[mapCacheKey] || 'Map_PC01';
-    // 실제 서버: IP:Port/MapName?team=0 형식으로 ClientTravel (real server: ClientTravel in IP:Port/MapName?team=0 format)
-    // ip 필드에 "IP/MapName" 형식으로 전달 시도 (attempt to pass in "IP/MapName" format in the ip field)
-    const ipWithMap = ip + '/' + mapName;
-    const [msg, respBody] = getExactMessageBuffer(0x00420115, 0x13);
-    respBody.writeUInt16LE(port, 0x00);
-    respBody.writeUInt8(0, 0x02);
-    respBody.write(ipWithMap + '\0', 0x03, Math.min(Buffer.byteLength(ipWithMap) + 1, 0x10), 'ascii');
+    const { msg, ipWithMap, bodySize, written, urlBytes } = buildReadyHostSnMsg(ip, port, mapCacheKey);
+
+    if (written < urlBytes + 1)
+        console.log(`[ZGateGameDispatch] !! Ready_Host_SN URL TRUNCATED: wrote ${written} of ${urlBytes + 1} bytes — client will travel to a map that does not exist`);
+
     client.send(msg);
-    console.log(`[ZGateGameDispatch] >> Sent Ready_Host_SN 0x00420115 ip=${ipWithMap} port=${port}`);
+    console.log(`[ZGateGameDispatch] >> Sent Ready_Host_SN 0x00420115 ip=${ipWithMap} port=${port} (mode=${"fit"}, body=0x${bodySize.toString(16)})`);
+}
+
+function sendReadyHostSnToRoomMember(targetClient, ip, port, mapCacheKey)
+{
+    const { msg, ipWithMap, bodySize, written, urlBytes } = buildReadyHostSnMsg(ip, port, mapCacheKey, true);
+
+    if (written < urlBytes + 1)
+        console.log(`[ZGateGameDispatch] !! Ready_Host_SN URL TRUNCATED (room member): wrote ${written} of ${urlBytes + 1} bytes — client will travel to a map that does not exist`);
+
+    targetClient.send(msg);
+    console.log(`[ZGateGameDispatch] >> Sent Ready_Host_SN 0x00420115 (room member) ip=${ipWithMap} port=${port} (mode=${"fit"}, body=0x${bodySize.toString(16)})`);
 }
 
 function sendRoomGameWaitSn(client, tag)
@@ -140,6 +199,76 @@ function sendRoomGameWaitSn(client, tag)
     const [msg] = getExactMessageBuffer(0x00420111, 0x00);
     client.send(msg);
     console.log(`[ZGateGameDispatch] >> Sent Game_Wait_SN 0x00420111 [${tag}]`);
+}
+function sendGameUserSn(client, tag)
+{
+    const accountIndex = Number(client.accountIndex_ || client.accountId_ || 1);
+    const ctx = {
+        accountIndex,
+        nickname: client.nickname_ || 'Player',
+        userLevelText: '1',
+
+        teamIndex: 0,
+        selectedMech: Number(client.currentHangarSlot_) || 1,
+        pilotId: Number(client.pilot_) || 101,
+    };
+    console.log(`[ZGateGameDispatch] >> Game_User_SN [${tag}]`);
+    return Promise.resolve(sendGameUserBootstrap(client, ctx, getExactMessageBuffer))
+        .catch(err => console.error(`[ZGateGameDispatch] >> Game_User_SN failed: ${err.message}`));
+}
+async function sendGameUserSnRoomBroadcast(room, tag, expectedGen)
+{
+    const targetAccountIds = Array.from(room.members.keys());
+    const sourceAccountIdsSnapshot = Array.from(room.members.keys());
+
+    for (const targetAccountId of targetAccountIds) {
+        for (const sourceAccountId of sourceAccountIdsSnapshot) {
+
+            const currentRoom = rooms.getRoom(room.id);
+            if (!currentRoom) {
+                console.log(`[ZGateGameDispatch] >> Game_User_SN room broadcast aborted: room #${room.id} no longer tracked [${tag}]`);
+                return;
+            }
+            if (expectedGen !== undefined && currentRoom.battleStartGen !== expectedGen) {
+                console.log(`[ZGateGameDispatch] >> Game_User_SN room broadcast aborted: room #${room.id}'s battleStartGen changed (${expectedGen} -> ${currentRoom.battleStartGen}) mid-batch [${tag}]`);
+                return;
+            }
+            const currentTarget = currentRoom.members.get(targetAccountId);
+            if (!currentTarget || !currentTarget.client) {
+
+                break;
+            }
+            const currentSource = currentRoom.members.get(sourceAccountId);
+            if (!currentSource) continue;
+
+            const sourceClient = currentSource.client;
+
+            const teamIndex = 0;
+            const ctx = {
+                accountIndex: Number(currentSource.accountId),
+                nickname: currentSource.nickname || 'Player',
+                teamIndex,
+                userLevelText: '1',
+                selectedMech: Number(sourceClient && sourceClient.currentHangarSlot_) || 1,
+                pilotId: Number(sourceClient && sourceClient.pilot_) || 101,
+            };
+            console.log(`[ZGateGameDispatch] >> Game_User_SN [room #${currentRoom.id} broadcast, target=${currentTarget.accountId}, source=${currentSource.accountId}, ${tag}]`);
+            try {
+
+                await sendGameUserBootstrap(currentTarget.client, ctx, getExactMessageBuffer, {
+                    sendTo: currentTarget.client,
+                    itemsAccountId: currentSource.accountId,
+                });
+            } catch (err) {
+                console.error(`[ZGateGameDispatch] >> Game_User_SN (room broadcast) failed: ${err.message}`);
+            }
+        }
+    }
+}
+
+function getGameInfoRound(client)
+{
+    return Number(client.playRound_) || 0;
 }
 
 function sendGameInfoSn(client, tag)
@@ -150,48 +279,112 @@ function sendGameInfoSn(client, tag)
     const mapId = Number(client.campaignMapCacheKey_ || CAMPAIGN_MAP_CACHE_INDEX_BY_MAP_ID[client.mapId_] || client.mapId_ || 58) & 0xFFFF;  // Cache.Bin 인덱스로 전송 (sent as Cache.Bin index)
     const userIndex = Number(client.accountIndex_ || client.accountId_ || 1) & 0xFFFF;
     const battleIndex = 1;
-    const redTeamIndex = 1;
-    const blueTeamIndex = 0;
+    const redTeamIndex = 0;
+    const blueTeamIndex = 1;
     const clanFlag = 0;
-    const quarterIndex = 1;
+    let timeLimitMinutes = 10;
+    let timeLimitSource = 'hardcoded';
+    {
+        if (client.mapChangeOneTime_) {
+            timeLimitMinutes = client.mapChangeOneTime_;
+            timeLimitSource = 'mapChangeOne';
+        } else if (client.createPlayTime_) {
+            timeLimitMinutes = client.createPlayTime_;
+            timeLimitSource = 'create';
+        }
+    }
+    const goalScore = 0;
 
-    // Experimental Game_Info_SN body.
-    // Confirmed fields exist, but semantics are still partial.
-    // Static analysis shows:
-    //   packet+0x10 -> logged as Battle
-    //   packet+0x14 -> logged as RedTeamIndex
-    //   packet+0x16 -> logged as BlueTeamIndex
-    //   packet+0x1E -> logged as Clan
-    //   packet+0x1F -> compared with 2, logged as a boolean-like Quarter flag
-    // Keep map and player hints in later fields until their exact semantics are
-    // confirmed, so we do not poison team/map selection again.
-    body.writeUInt32LE(battleIndex, 0x00);      // packet+0x10 Battle
-    body.writeUInt16LE(redTeamIndex, 0x04);     // packet+0x14 RedTeamIndex
-    body.writeUInt16LE(blueTeamIndex, 0x06);    // packet+0x16 BlueTeamIndex
-    body.writeUInt16LE(mapId, 0x0A);            // packet+0x1A candidate map/battle field
-    body.writeUInt16LE(0, 0x0C);                // packet+0x1C candidate mode/round field
-    body.writeUInt8(clanFlag, 0x0E);            // packet+0x1E Clan
-    body.writeUInt16LE(2, 0x0F);                // packet+0x1F confirmed == 2 check
-    body.writeUInt16LE(userIndex, 0x11);        // packet+0x21 user/account hint
-    body.writeUInt16LE(quarterIndex, 0x13);     // packet+0x23 candidate quarter/round index
-    body.writeUInt8(0, 0x15);                   // packet+0x25 candidate flag
-    body.writeUInt16LE(0, 0x16);                // packet+0x26 candidate field
-    body.writeUInt16LE(0, 0x18);                // packet+0x28 candidate field
+    body.writeUInt32LE(battleIndex, 0x00);
+    body.writeUInt16LE(redTeamIndex, 0x04);
+    body.writeUInt16LE(blueTeamIndex, 0x06);
+    body.writeUInt16LE(0, 0x0A);
+    body.writeUInt16LE(0, 0x0C);
+    body.writeUInt8(clanFlag, 0x0E);
+    body.writeUInt16LE(2, 0x0F);
+    body.writeUInt16LE(mapId, 0x11);
+    body.writeUInt16LE(timeLimitMinutes, 0x13);
+
+    const playRound = getGameInfoRound(client);
+    body.writeUInt8(playRound & 0xFF, 0x15);
+    body.writeUInt16LE(goalScore, 0x16);
+    body.writeUInt16LE(goalScore, 0x18);
 
     client.send(msg);
     console.log(
         `[ZGateGameDispatch] >> Sent Game_Info_SN 0x00222111 [${tag}] ` +
-        `(battle=${battleIndex}, red=${redTeamIndex}, blue=${blueTeamIndex}, map=${mapId}, clan=${clanFlag}, user=${userIndex}, quarter=${quarterIndex}, body=${body.toString('hex')})`
+        `(battle=${battleIndex}, red=${redTeamIndex}, blue=${blueTeamIndex}, map=${mapId}, ` +
+        `clan=${clanFlag}, user=${userIndex}, timeLimit=${timeLimitMinutes} (${timeLimitSource}), round=${playRound}, goal=${goalScore}, ` +
+        `body=${body.toString('hex')})`
+    );
+}
+
+function sendRoomGameWaitSnBroadcast(room, tag)
+{
+    rooms.sendAll(room.id, () => {
+        const [msg] = getExactMessageBuffer(0x00420111, 0x00);
+        return msg;
+    });
+    console.log(`[ZGateGameDispatch] >> Broadcast Game_Wait_SN 0x00420111 to room #${room.id} (${room.members.size} member(s)) [${tag}]`);
+}
+
+function sendAckBroadcast(room, type, tag)
+{
+    rooms.sendAll(room.id, () => {
+        const [msg, respBody] = getExactMessageBuffer(type, 0x06);
+        respBody.writeUint16LE(0, 0x00);
+        respBody.writeUint32LE(0, 0x02);
+        return msg;
+    });
+    console.log(`[ZGateGameDispatch] >> Broadcast 0x${type.toString(16).padStart(8, '0')} to room #${room.id} (${room.members.size} member(s), status=0, result=0) [${tag}]`);
+}
+
+function sendGameInfoSnRoomBroadcast(room, tag)
+{
+    const BODY_SIZE = 0x1A;
+    const mapId = Number(room.mapId || MAP_ID_DEFAULT_CAMPAIGN) & 0xFFFF;
+    const battleIndex = 1;
+    const redTeamIndex = 0;
+    const blueTeamIndex = 1;
+    const clanFlag = 0;
+
+    let timeLimitMinutes = 10;
+    let timeLimitSource = 'hardcoded';
+    if (room.playTime) {
+        timeLimitMinutes = room.playTime;
+        timeLimitSource = 'room';
+    }
+    const playRound = Number(room.playRound) || 0;
+    const goalScore = 0;
+
+    rooms.sendAll(room.id, () => {
+        const [msg, body] = getExactMessageBuffer(0x00222111, BODY_SIZE);
+        body.writeUInt32LE(battleIndex, 0x00);
+        body.writeUInt16LE(redTeamIndex, 0x04);
+        body.writeUInt16LE(blueTeamIndex, 0x06);
+        body.writeUInt16LE(0, 0x0A);
+        body.writeUInt16LE(0, 0x0C);
+        body.writeUInt8(clanFlag, 0x0E);
+        body.writeUInt16LE(2, 0x0F);
+        body.writeUInt16LE(mapId, 0x11);
+        body.writeUInt16LE(timeLimitMinutes, 0x13);
+        body.writeUInt8(playRound & 0xFF, 0x15);
+        body.writeUInt16LE(goalScore, 0x16);
+        body.writeUInt16LE(goalScore, 0x18);
+        return msg;
+    });
+    console.log(
+        `[ZGateGameDispatch] >> Broadcast Game_Info_SN 0x00222111 to room #${room.id} (${room.members.size} member(s)) [${tag}] ` +
+        `(battle=${battleIndex}, red=${redTeamIndex}, blue=${blueTeamIndex}, map=${mapId}, ` +
+        `clan=${clanFlag}, timeLimit=${timeLimitMinutes} (${timeLimitSource}), round=${playRound}, goal=${goalScore})`
     );
 }
 
 function scheduleGameWaitSnExperiment(client)
 {
-    if (GAME_WAIT_SN_EXPERIMENT_MODE !== 'enabled') {
-        return;
-    }
-    if (!client.campaignStarted_) {
-        console.log(`[ZGateGameDispatch] >> Skipped Game_Wait_SN experiment (campaignStarted_=false)`);
+
+    if (!client.battleStartSequenceArmed_) {
+        console.log(`[ZGateGameDispatch] >> Skipped Game_Wait_SN experiment (battleStartSequenceArmed_=false)`);
         return;
     }
     if (client.gameWaitExperimentSent_) {
@@ -208,11 +401,9 @@ function scheduleGameWaitSnExperiment(client)
 
 function schedulePostGameWaitReadyHost(client)
 {
-    if (POST_GAME_WAIT_READY_HOST_MODE !== 'enabled') {
-        return;
-    }
-    if (!client.campaignStarted_) {
-        console.log(`[ZGateGameDispatch] >> Skipped post-Game_Wait Ready_Host (campaignStarted_=false)`);
+
+    if (!client.battleStartSequenceArmed_) {
+        console.log(`[ZGateGameDispatch] >> Skipped post-Game_Wait Ready_Host (battleStartSequenceArmed_=false)`);
         return;
     }
     if (client.postGameWaitReadyHostSent_) {
@@ -231,11 +422,9 @@ function schedulePostGameWaitReadyHost(client)
 
 function scheduleGameInfoSnExperiment(client)
 {
-    if (GAME_INFO_SN_EXPERIMENT_MODE !== 'enabled') {
-        return;
-    }
-    if (!client.campaignStarted_) {
-        console.log(`[ZGateGameDispatch] >> Skipped Game_Info_SN experiment (campaignStarted_=false)`);
+
+    if (!client.battleStartSequenceArmed_) {
+        console.log(`[ZGateGameDispatch] >> Skipped Game_Info_SN experiment (battleStartSequenceArmed_=false)`);
         return;
     }
     if (client.waitingGameInfoExperimentSent_) {
@@ -253,15 +442,13 @@ function scheduleGameInfoSnExperiment(client)
 
 function primeReadyHostHandshake(client)
 {
-    if (READY_HOST_GATE_PRIME_MODE !== 'enabled') {
-        return;
-    }
-    if (!client.campaignStarted_) {
-        console.log(`[ZGateGameDispatch] >> Skipped Ready_Host prime (campaignStarted_=false)`);
+
+    if (!client.battleStartSequenceArmed_) {
+        console.log(`[ZGateGameDispatch] >> Skipped Ready_Host prime (battleStartSequenceArmed_=false)`);
         return;
     }
     if (client.readyHostHandshakeSent_) {
-        console.log(`[ZGateGameDispatch] >> Skipped Ready_Host prime (already sent for this room/start)`); 
+        console.log(`[ZGateGameDispatch] >> Skipped Ready_Host prime (already sent for this room/start)`);
         return;
     }
 
@@ -299,47 +486,102 @@ function resolveExperimentValue(value, client)
     return value;
 }
 
-function writeMapChangeOneBody(body, fields)
+function writeMapChangeOneBody(body, fields, offset = 0)
 {
-    body.writeUInt8(fields.b0 & 0xFF, 0);
-    body.writeUInt16LE(fields.w1 & 0xFFFF, 1);
-    body.writeUInt16LE(fields.w2 & 0xFFFF, 3);
-    body.writeUInt8(fields.b5 & 0xFF, 5);
-    body.writeUInt16LE(fields.w6 & 0xFFFF, 6);
-    body.writeUInt16LE(fields.w8 & 0xFFFF, 8);
+    body.writeUInt8(fields.b0 & 0xFF, offset + 0);
+    body.writeUInt16LE(fields.w1 & 0xFFFF, offset + 1);
+    body.writeUInt16LE(fields.w2 & 0xFFFF, offset + 3);
+    body.writeUInt8(fields.b5 & 0xFF, offset + 5);
+    body.writeUInt16LE(fields.w6 & 0xFFFF, offset + 6);
+    body.writeUInt16LE(fields.w8 & 0xFFFF, offset + 8);
 }
 
 function buildMapChangeOneSaFields(body, client)
 {
     const incoming = parseMapChangeOneBody(body);
-    if (MAP_CHANGE_ONE_SA_EXPERIMENT.mode === 'echo') {
-        return incoming;
-    }
-    if (MAP_CHANGE_ONE_SA_EXPERIMENT.mode === 'manual') {
+    {
+        const adoptedMapId = Number(client.campaignMapCacheKey_);
+        const adoptedRound = Number(client.playRound_);
         return {
             rawHex: null,
-            b0: resolveExperimentValue(MAP_CHANGE_ONE_SA_EXPERIMENT.manual.b0, client),
-            w1: resolveExperimentValue(MAP_CHANGE_ONE_SA_EXPERIMENT.manual.w1, client),
-            w2: resolveExperimentValue(MAP_CHANGE_ONE_SA_EXPERIMENT.manual.w2, client),
-            b5: resolveExperimentValue(MAP_CHANGE_ONE_SA_EXPERIMENT.manual.b5, client),
-            w6: resolveExperimentValue(MAP_CHANGE_ONE_SA_EXPERIMENT.manual.w6, client),
-            w8: resolveExperimentValue(MAP_CHANGE_ONE_SA_EXPERIMENT.manual.w8, client),
+
+            b0: incoming.b0,
+            w1: adoptedMapId >= 9001 && adoptedMapId <= 9012
+                ? adoptedMapId : incoming.w1,
+            w2: incoming.w2,
+            b5: Number.isInteger(adoptedRound) && adoptedRound >= 0 && adoptedRound <= 0xFF
+                ? adoptedRound : incoming.b5,
+            w6: incoming.w6,
+            w8: incoming.w8,
         };
     }
+
+}
+
+function buildRoomCtxFromRoom(room, accountId) {
     return {
-        rawHex: null,
-        b0: 0,
-        w1: 0,
-        w2: 0,
-        b5: 0,
-        w6: 0,
-        w8: 0,
+        roomIndex: room.id,
+        accountIndex: accountId,
+        roomType: room.rawRoomType,
+        mapId: room.mapId,
+        maxPlayers: room.maxPlayers,
+        currentUsers: room.members.size,
+        gameMode: room.gameMode,
+        mapIndex: room.mapId,
+        roomName: room.name,
+        roomSettingGoal: room.campaign ? 0 : room.members.size,
+        roomSettingTime: room.campaign ? 0 : room.maxPlayers,
+        roomSettingRound: room.campaign ? 1 : 0,
+        roomDefaultEntryCount: room.campaign
+            ? ROOM_DEFAULT_ENTRY_HINTS.length
+            : Math.min(Math.max(room.maxPlayers, 1), ROOM_DEFAULT_ENTRY_HINTS.length),
+        roomDefaultEntryHints: ROOM_DEFAULT_ENTRY_HINTS,
+        primaryBodyCacheIndex: CAMPAIGN_MAP_CACHE_INDEX_BY_MAP_ID[room.createMapId || 1] || ROOM_DEFAULT_ENTRY_HINTS[0] || 8,
+        selectedMech: 1,
+        isCampaignRoom: room.campaign,
+        optionMask: room.optionMask || 0,
+
+        roomOptions: room.options,
+        isTrueCampaign: room.isTrueCampaign,
+        campaignMapCacheKey: room.mapId,
+        campaignMapHints: computeCampaignMapAllHints(),
+
+        mapChangeOneTime: room.playTime,
+        mapChangeOneRound: room.playRound,
+        playRound: room.playRound,
+        mapChangeOneKill: undefined,
+        mapChangeOneGoal: undefined,
     };
+}
+
+function sendFullRoomStateToClient(client, room, accountId, tag) {
+    const roomStateCtx = buildRoomCtxFromRoom(room, accountId);
+    sendRoomStatePackets(client, roomStateCtx, getExactMessageBuffer);
+    sendRoomMapPackets(client, roomStateCtx, getExactMessageBuffer, { mapChangeOneResponse: true });
+    if (room.campaign) {
+        const { sendCampaignBootstrap } = require('./room/room-map.sender');
+        sendCampaignBootstrap(client, getExactMessageBuffer);
+    }
+    const allMembers = Array.from(room.members.values());
+    for (const member of allMembers) {
+        const memberCtx = buildMemberUserCtx(member);
+        const includeMaster = member.accountId === room.hostAccountId;
+        sendRoomUserPackets(client, memberCtx, getExactMessageBuffer, { includeMaster });
+
+    }
+    console.log(`[ZGateGameDispatch] >> Sent full room state from Room #${room.id} to account ${accountId} (members=${allMembers.length})${tag ? ` [${tag}]` : ''}`);
 }
 
 function resendRoomState(client, tag)
 {
     try {
+        const accountId = Number(client.accountIndex_ || client.accountId_ || 1);
+
+        const room = rooms.getRoomByAccount(accountId);
+        if (room && accountId !== room.hostAccountId) {
+            sendFullRoomStateToClient(client, room, accountId, tag);
+            return;
+        }
         const ZRoomDispatch = require('./room.dispatch');
         const roomDispatch = new ZRoomDispatch();
         roomDispatch.sendRoomState(client);
@@ -365,6 +607,22 @@ function clearPendingRoomStateRetries(client, reason)
 function resendRoomMapOnly(client, tag)
 {
     try {
+
+        const accountIdForRoom = Number(client.accountIndex_ || client.accountId_ || 1);
+        const roomForResend = rooms.getRoomByAccount(accountIdForRoom);
+        if (roomForResend && accountIdForRoom !== roomForResend.hostAccountId) {
+            const roomCtx = buildRoomCtxFromRoom(roomForResend, accountIdForRoom);
+            if (!roomCtx.isTrueCampaign) {
+                console.log(`[ZGateGameDispatch] >> Skipped map-only resend [${tag}] (not true campaign room)`);
+                return;
+            }
+            const { sendRoomMapPackets, sendCampaignBootstrap } = require('./room/room-map.sender');
+            sendRoomMapPackets(client, roomCtx, getExactMessageBuffer, { mapChangeOneResponse: true });
+            sendCampaignBootstrap(client, getExactMessageBuffer);
+            console.log(`[ZGateGameDispatch] >> Re-sent map packets only from Room #${roomForResend.id} [${tag}] (mapId=${roomCtx.mapId}, cacheKey=${roomCtx.campaignMapCacheKey})`);
+            return;
+        }
+
         if (!client.isTrueCampaign_) {
             console.log(`[ZGateGameDispatch] >> Skipped map-only resend [${tag}] (not true campaign room)`);
             return;
@@ -372,16 +630,23 @@ function resendRoomMapOnly(client, tag)
 
         const { sendRoomMapPackets, sendCampaignBootstrap } = require('./room/room-map.sender');
         // sendRoomState와 동일한 맵 목록 사용 — same map list as sendRoomState (CAMPAIGN_MAP_ALL_HINTS)
-        const campaignMapAllHints = [8, 37, 30, 34, 43, 6, 2, 26, 36, 43, 16, 24, 45, 47, 49, 14, 10, 22, 52, 30, 18];
-        const roomDefaultEntryHints = [8, 37, 30, 34, 6, 2];
+        const campaignMapAllHints = computeCampaignMapAllHints();
+        const roomDefaultEntryHints = ROOM_DEFAULT_ENTRY_HINTS;
         const mapId = client.createdMapId_ || client.mapId_ || 1;
         const campaignMapCacheKey = client.campaignMapCacheKey_ || CAMPAIGN_MAP_CACHE_INDEX_BY_MAP_ID[mapId] || 8;
         const ctx = {
             campaignMapCacheKey,
             roomDefaultEntryHints,
             campaignMapHints: campaignMapAllHints,
+
+            isTrueCampaign: client.isTrueCampaign_,
+            mapChangeOneTime: client.mapChangeOneTime_,
+            mapChangeOneRound: client.mapChangeOneRound_,
+            playRound: client.playRound_,
+            mapChangeOneKill: client.mapChangeOneKill_,
+            mapChangeOneGoal: client.mapChangeOneGoal_,
         };
-        sendRoomMapPackets(client, ctx, getExactMessageBuffer);
+        sendRoomMapPackets(client, ctx, getExactMessageBuffer, { mapChangeOneResponse: true });
         sendCampaignBootstrap(client, getExactMessageBuffer);
         console.log(`[ZGateGameDispatch] >> Re-sent map packets only [${tag}] (mapId=${mapId}, cacheKey=${campaignMapCacheKey})`);
     } catch (err) {
@@ -422,7 +687,7 @@ class ZGateGameDispatch
             {
                 console.log(`[ZGateGameDispatch] >> Room Create request (${body.length} bytes)`);
 
-                const roomIndex = nextRoomIndex++;
+                const roomIndex = rooms.allocateRoomId();
                 const enterRoomIndex = 0;
                 const nickname = client.nickname_ || 'Player';
 
@@ -441,12 +706,12 @@ class ZGateGameDispatch
                 const roomNumberValue = body.length >= 14 ? body.readUInt16LE(12) : 1;
                 const gameMode = createWord4 & 0xFF;
                 const rawName = body.length > 14
-                    ? body.subarray(14, Math.min(body.length, 39)).toString('ascii').split('\0').shift()
+                    ? decodeAnsiBytes(body.subarray(14, Math.min(body.length, 39)))
                     : '';
                 const roomName = rawName || `${nickname}`;
                 const hasPassword = body.length > 39 ? body[39] : 0;
                 const roomPassword = hasPassword
-                    ? body.subarray(40, Math.min(body.length, 51)).toString('ascii').split('\0').shift()
+                    ? decodeAnsiBytes(body.subarray(40, Math.min(body.length, 51)))
                     : '';
                 // isCampaignLike: roomType 1(캠페인)과 2(PvP) 모두 최대 8명 슬롯 유지용 (keeps max 8-player slots for both roomType 1 (campaign) and 2 (PvP))
                 const isCampaignLike = (roomType === 1) || (roomType === 2) || (gameMode === 4 || gameMode === 5);
@@ -457,7 +722,8 @@ class ZGateGameDispatch
                 // isTrueCampaign: 실제 캠페인 방 여부 (PvP는 false) (whether it is an actual campaign room, PvP=false)
                 const isTrueCampaign = (roomType === 1) || (gameMode === 4 || gameMode === 5);
 
-                console.log(`[ZGateGameDispatch] >> Creating room #${roomIndex} (type=${roomType}->${effectiveRoomType}, map=${mapId}, opt1=0x${createWord1.toString(16)}, opt2=0x${createWord2.toString(16)}, max=${maxPlayers}, mode=${gameMode}, valueFlag=${roomNumberFlag}, value=${roomNumberValue}) for "${nickname}"`);
+                const roomNameBig5Readable = decodeBig5ForLog(roomName);
+                console.log(`[ZGateGameDispatch] >> Creating room #${roomIndex} (type=${roomType}->${effectiveRoomType}, map=${mapId}, opt1=0x${createWord1.toString(16)}, opt2=0x${createWord2.toString(16)}, max=${maxPlayers}, mode=${gameMode}, valueFlag=${roomNumberFlag}, value=${roomNumberValue}) for "${nickname}"${roomNameBig5Readable ? ` name_big5="${roomNameBig5Readable}"` : ''}`);
 
                 // Store room info on client for other dispatchers to reference
                 client.createdRoomIndex_ = roomIndex;
@@ -465,9 +731,11 @@ class ZGateGameDispatch
                 client.roomType_ = effectiveRoomType;
                 client.rawRoomType_ = roomType;
                 client.mapId_ = mapId;
+                client.playRound_ = body.length > 6 ? body[6] : 0;
                 client.createByte1_ = createByte1;
                 client.createWord1_ = createWord1;
                 client.createWord2_ = createWord2;
+                client.createPlayTime_ = createWord2;
                 client.createWord3_ = createWord3;
                 client.createWord4_ = createWord4;
                 client.roomNumberFlag_ = roomNumberFlag;
@@ -480,12 +748,58 @@ class ZGateGameDispatch
                 client.campaignRoom_ = isCampaignLike;
                 client.isTrueCampaign_ = isTrueCampaign;  // 실제 캠페인 여부 (PvP=false) (whether it is an actual campaign room, PvP=false)
                 client.createdMapId_ = mapId;
-                client.campaignMapCacheKey_ = CAMPAIGN_MAP_CACHE_INDEX_BY_MAP_ID[mapId] || 8;
+                {
+                    const pickedMap = body.length >= 4 ? body.readUInt16LE(2) : 0;
+                    const isPvpRoomForMapDefault = false;
+                    client.campaignMapCacheKey_ = isPvpRoomForMapDefault
+                        ? (MAP_IDS_PVP.includes(pickedMap) ? pickedMap : MAP_ID_DEFAULT_PVP)
+                        : ((pickedMap >= 9001 && pickedMap <= 9012) ? pickedMap : MAP_ID_DEFAULT_CAMPAIGN);
+                }
                 client.readyHostHandshakeSent_ = false;
                 client.gameUserBootstrapSent_ = false;
                 client.waitingGameInfoExperimentSent_ = false;
                 client.gameWaitExperimentSent_ = false;
                 client.postGameWaitReadyHostSent_ = false;
+
+                {
+                    const hostAccountId = Number(client.accountIndex_ || client.accountId_ || 1);
+                    const room = rooms.createRoom({
+                        id: roomIndex,
+                        name: roomName,
+                        mapId: client.campaignMapCacheKey_ || mapId,
+
+                        playTime: client.mapChangeOneTime_ || 0,
+                        playRound: client.playRound_,
+                        maxPlayers,
+                        campaign: isCampaignLike,
+                        hostAccountId,
+
+                        roomType: effectiveRoomType,
+                        hasPassword: !!roomPassword,
+                        password: roomPassword,
+
+                        rawRoomType: roomType,
+                        isTrueCampaign,
+                        gameMode,
+                        optionMask: createWord2,
+
+                        createMapId: mapId,
+                    });
+                    rooms.addMember(room.id, {
+                        accountId: hostAccountId,
+                        nickname,
+
+                        team: 0,
+                        slot: 0,
+                        ready: false,
+                        client,
+                    });
+
+                    {
+                        broadcastRoomListChange(rooms.getLobbyClients(), room, 1, getExactMessageBuffer);
+                        console.log(`[ZGateGameDispatch] >> Broadcast new room #${room.id} to the lobby`);
+                    }
+                }
 
                 // ZDispatchLobby::Create_CQ sends 0x220201 with Send(..., 0x220202),
                 // so the matching success response is Create_SA 0x220202. The
@@ -498,7 +812,10 @@ class ZGateGameDispatch
                     respBody.writeUint32LE(0, 0x02);
                     respBody.writeUint16LE(enterRoomIndex, 0x06);
                     respBody.writeUint8(0, 0x0B);
-                    respBody.write(roomName + '\0', 0x0E, Math.min(Buffer.byteLength(roomName) + 1, 0x19), 'ascii');
+
+                    const createSaNameEncoding = 'latin1';
+                    const createSaNameLengthBasis = Buffer.byteLength(roomName, 'latin1');
+                    respBody.write(roomName + '\0', 0x0E, Math.min(createSaNameLengthBasis + 1, 0x19), createSaNameEncoding);
                     respBody.writeUint8(roomPassword ? 1 : 0, 0x27);
                     client.send(msg);
                     console.log(`[ZGateGameDispatch] >> Sent Create_SA 0x220202 (Lobby_Room_Create trigger, roomIndex=${enterRoomIndex}, body=${bodySize}, directName=1)`);
@@ -516,16 +833,20 @@ class ZGateGameDispatch
                             const roomDispatch = new ZRoomDispatch();
                             roomDispatch.sendRoomState(client);
                             console.log(`[ZGateGameDispatch] >> Sent room state notifications (0x22 room SN) [${tag}]`);
+
+                            {
+                                if (client.isTrueCampaign_ && !client.campaignMapCacheKey_)
+                                    client.campaignMapCacheKey_ = MAP_ID_DEFAULT_CAMPAIGN;
+                                sendGameInfoSn(client, `room state [${tag}]`);
+                            }
                         } catch (err) {
                             console.error(`[ZGateGameDispatch] >> Error sending room state:`, err.message);
                         }
                     }, delay);
                     client.roomStateRetryTimers_.push(timer);
                 };
-                sendRoomStateDelayed(350, 'delayed');
-                sendRoomStateDelayed(1200, 'retry after scene change');
-                sendRoomStateDelayed(2500, 'late room scene retry');
-                sendRoomStateDelayed(5000, 'final room scene retry');
+                for (const [delay, tag] of ROOM_STATE_RETRY_SCHEDULE)
+                    sendRoomStateDelayed(delay, tag);
 
                 return true;
             }
@@ -570,6 +891,26 @@ class ZGateGameDispatch
                     client.roomEnterAcked_ = true;
                     resendRoomState(client, 'room-enter cn (first)');
                 }
+
+                {
+                    const accountIdForReady = Number(client.accountIndex_ || client.accountId_ || 1);
+                    const roomForReady = rooms.getRoomByAccount(accountIdForReady);
+                    if (roomForReady && accountIdForReady !== roomForReady.hostAccountId) {
+                        const readyFlag = body.length >= 5 ? body.readUInt8(4) !== 0 : false;
+                        const member = roomForReady.members.get(accountIdForReady);
+                        if (member) member.ready = readyFlag;
+                        const rawState = readyFlag ? 2 : 1;
+                        rooms.sendAll(roomForReady.id, () => {
+                            const [msg, respBody] = getExactMessageBuffer(0x00220401, 0x08);
+                            respBody.writeUint8(0, 0x00);
+                            respBody.writeUint8(1, 0x01);
+                            respBody.writeUint16LE(accountIdForReady, 0x02);
+                            respBody.writeUint32LE(rawState, 0x04);
+                            return msg;
+                        });
+                        console.log(`[ZGateGameDispatch] >> Broadcast User_State_SN 0x220401 (account=${accountIdForReady}, ready=${readyFlag}, raw=${rawState})`);
+                    }
+                }
                 return true;
             }
 
@@ -578,6 +919,26 @@ class ZGateGameDispatch
             // ==========================================
             case 0x00222103:
             {
+
+                {
+                    const accountIdForGate = Number(client.accountIndex_ || client.accountId_ || 1);
+                    const roomForGate = rooms.getRoomByAccount(accountIdForGate);
+                    if (roomForGate) {
+                        if (accountIdForGate !== roomForGate.hostAccountId) {
+                            console.log(`[ZGateGameDispatch] >> Ignored Game_Start_CN 0x00222103 from non-host account=${accountIdForGate} (host=${roomForGate.hostAccountId}, room #${roomForGate.id})`);
+                            return true;
+                        }
+                        if (roomForGate.members.size > 1) {
+
+                            const hostAddress = client.username_ ? whitelist.getHostAddress(client.username_) : null;
+                            if (!hostAddress) {
+                                console.error(`[ZGateGameDispatch] !! Refusing battle start: no hostAddress configured for host account=${accountIdForGate} (username=${client.username_}, nickname=${client.nickname_}), room #${roomForGate.id} has ${roomForGate.members.size} members`);
+                                return true;
+                            }
+                        }
+                    }
+                }
+
                 // Static analysis confirms both Game_Ready_SN (0x222102) and
                 // Game_Start_SN (0x222104) consume the same simple SA body and
                 // emit NETWORK_ROOM_GAME_READY. Current runtime only sending
@@ -585,32 +946,236 @@ class ZGateGameDispatch
                 // experiment that can also send 0x222102 first.
                 console.log(`[ZGateGameDispatch] >> Room Game_Start_CQ`);
                 clearPendingRoomStateRetries(client, 'game-start cq');
-                client.gameStarted_ = true;
-                client.campaignStarted_ = (Number(client.rawRoomType_) === 1) ||
-                    (Number(client.gameMode_) === 4 || Number(client.gameMode_) === 5);
-                console.log(`[ZGateGameDispatch] >> Armed gameStarted_=${client.gameStarted_} campaignStarted_=${client.campaignStarted_}`);
-                if (READY_HOST_GATE_PRIME_MODE === 'enabled' && client.campaignStarted_) {
-                    sendReadyHostSq(client);
-                }
-                // Game_Info_SN을 먼저 보내고, 그 다음 Game_Ready_SN + Game_Start_SN (send Game_Info_SN first, then Game_Ready_SN + Game_Start_SN)
-                // 클라이언트가 Game_Info_SN의 mapId를 읽어서 ClientTravel 대상 맵을 결정하기 때문 (because the client reads the mapId from Game_Info_SN to determine the ClientTravel target map)
-                scheduleGameInfoSnExperiment(client);
-                setTimeout(() => {
-                    if (GAME_START_HANDSHAKE_MODE === 'ready_then_start') {
-                        sendOkSa(client, 0x00222102, 'Game_Ready_SN');
-                        setTimeout(() => {
-                            sendOkSa(client, 0x00222104, 'Game_Start_SN');
-                            primeReadyHostHandshake(client);
-                            scheduleGameWaitSnExperiment(client);
-                            schedulePostGameWaitReadyHost(client);
-                        }, 100);
-                    } else {
-                        sendOkSa(client, 0x00222104, 'Game_Start_SN');
-                        primeReadyHostHandshake(client);
-                        scheduleGameWaitSnExperiment(client);
-                        schedulePostGameWaitReadyHost(client);
+
+                client.pveRoundsCleared_ = 0;
+                {
+                    const accountIdForRoundReset = Number(client.accountIndex_ || client.accountId_ || 1);
+                    const roomForRoundReset = rooms.getRoomByAccount(accountIdForRoundReset);
+                    if (roomForRoundReset && accountIdForRoundReset === roomForRoundReset.hostAccountId) {
+                        roomForRoundReset.pveRoundsCleared_ = 0;
+
                     }
-                }, 400); // Game_Info_SN 전송 후 400ms 대기 (wait 400ms after sending Game_Info_SN)
+                }
+
+                {
+                    const accountIdForStart = Number(client.accountIndex_ || client.accountId_ || 1);
+                    const roomForStart = rooms.getRoomByAccount(accountIdForStart);
+                    if (roomForStart) {
+                        for (const member of roomForStart.members.values()) {
+                            member.ready = false;
+                        }
+                    }
+                }
+
+                const accountIdForBattleBroadcast = Number(client.accountIndex_ || client.accountId_ || 1);
+                const roomForBattleBroadcast = rooms.getRoomByAccount(accountIdForBattleBroadcast);
+
+                let startedBattleGen;
+                let startedHostAccountId;
+                if (roomForBattleBroadcast) {
+                    roomForBattleBroadcast.battleStartGen = (roomForBattleBroadcast.battleStartGen || 0) + 1;
+                    startedBattleGen = roomForBattleBroadcast.battleStartGen;
+                    startedHostAccountId = roomForBattleBroadcast.hostAccountId;
+                }
+
+                function battleStartStillValid(tag)
+                {
+                    if (!roomForBattleBroadcast) return true;
+                    const currentRoom = rooms.getRoom(roomForBattleBroadcast.id);
+                    if (!currentRoom) {
+                        console.log(`[ZGateGameDispatch] >> Battle-start aborted: room #${roomForBattleBroadcast.id} no longer tracked [${tag}]`);
+                        return false;
+                    }
+                    if (currentRoom.battleStartGen !== startedBattleGen) {
+                        console.log(`[ZGateGameDispatch] >> Battle-start aborted: room #${roomForBattleBroadcast.id}'s battleStartGen changed (${startedBattleGen} -> ${currentRoom.battleStartGen}, a newer Game_Start_CN superseded this one) [${tag}]`);
+                        return false;
+                    }
+                    if (currentRoom.hostAccountId !== startedHostAccountId) {
+                        console.log(`[ZGateGameDispatch] >> Battle-start aborted: room #${roomForBattleBroadcast.id}'s host changed (${startedHostAccountId} -> ${currentRoom.hostAccountId}) mid-sequence [${tag}]`);
+                        return false;
+                    }
+                    return true;
+                }
+
+                {
+
+                    const useRoomBattleBroadcast = !!roomForBattleBroadcast;
+
+                    if (useRoomBattleBroadcast) {
+                        for (const member of roomForBattleBroadcast.members.values()) {
+                            if (!member.client) continue;
+                            if (member.client.isTrueCampaign_ && !member.client.campaignMapCacheKey_)
+                                member.client.campaignMapCacheKey_ = MAP_ID_DEFAULT_CAMPAIGN;
+                            member.client.gameStarted_ = true;
+
+                            member.client.battleStartSequenceArmed_ = !!roomForBattleBroadcast.isTrueCampaign ||
+                                (false);
+                        }
+                    } else {
+
+                        if (client.isTrueCampaign_ && !client.campaignMapCacheKey_)
+                            client.campaignMapCacheKey_ = MAP_ID_DEFAULT_CAMPAIGN;
+                        client.gameStarted_ = true;
+
+                        client.battleStartSequenceArmed_ = (Number(client.rawRoomType_) === 1) ||
+                            (Number(client.gameMode_) === 4 || Number(client.gameMode_) === 5) ||
+                            (false);
+                    }
+
+                    if (useRoomBattleBroadcast) {
+                        sendRoomGameWaitSnBroadcast(roomForBattleBroadcast, 'server-driven: to scene 6');
+                    } else {
+                        sendRoomGameWaitSn(client, 'server-driven: to scene 6');
+                    }
+
+                    setTimeout(() => {
+                        if (!battleStartStillValid('game-user-sn @60ms')) return;
+
+                        if (roomForBattleBroadcast) {
+                            sendGameUserSnRoomBroadcast(roomForBattleBroadcast, 'server-driven: in-game user table', startedBattleGen);
+                        } else {
+                            sendGameUserSn(client, 'server-driven: in-game user table');
+                        }
+                    }, 60);
+
+                    setTimeout(() => {
+                        if (!battleStartStillValid('game-info-sn @150ms')) return;
+                        if (useRoomBattleBroadcast) {
+                            sendGameInfoSnRoomBroadcast(roomForBattleBroadcast, 'server-driven: scene-6 map');
+                        } else {
+                            sendGameInfoSn(client, 'server-driven: scene-6 map');
+                        }
+                    }, 150);
+
+                    setTimeout(() => {
+                        if (!battleStartStillValid('ready-start-sn @300ms')) return;
+                        if (useRoomBattleBroadcast) {
+                            sendAckBroadcast(roomForBattleBroadcast, 0x00222102, 'server-driven: Game_Ready_SN');
+                            sendAckBroadcast(roomForBattleBroadcast, 0x00222104, 'server-driven: Game_Start_SN');
+                        } else {
+                            sendOkSa(client, 0x00222102, 'server-driven: Game_Ready_SN');
+                            sendOkSa(client, 0x00222104, 'server-driven: Game_Start_SN');
+                        }
+                    }, 300);
+
+                    setTimeout(() => {
+                        if (!battleStartStillValid('ready-host-sq @450ms')) return;
+                        if (roomForBattleBroadcast) {
+
+                            const hostMember = roomForBattleBroadcast.members.get(roomForBattleBroadcast.hostAccountId);
+                            if (hostMember && hostMember.client) {
+                                sendReadyHostSq(hostMember.client);
+                            } else {
+                                console.error(`[ZGateGameDispatch] !! room #${roomForBattleBroadcast.id}'s host (account=${roomForBattleBroadcast.hostAccountId}) has no live connection -- not sending Ready_Host_SQ`);
+                            }
+                        } else {
+                            sendReadyHostSq(client);
+                        }
+                    }, 450);
+                    setTimeout(() => {
+                        if (!battleStartStillValid('game-info-sn retry @600ms')) return;
+                        if (useRoomBattleBroadcast) {
+                            sendGameInfoSnRoomBroadcast(roomForBattleBroadcast, 'server-driven: scene-6 map retry');
+                        } else {
+                            sendGameInfoSn(client, 'server-driven: scene-6 map retry');
+                        }
+                    }, 600);
+                    console.log(`[ZGateGameDispatch] >> SERVER_DRIVEN_START: Wait -> Info -> Ready/Start`);
+                    return true;
+                }
+
+            }
+
+            case 0x00222131:
+            {
+                console.log(`[ZGateGameDispatch] >> 0x222131 (Leave_CQ, in-battle): replying Leave_SA 0x222132`);
+                const [msg, respBody] = client.getMessageBuffer(0x00222132, 0x6);
+                respBody.writeUint16LE(0x0000, 0);
+                respBody.writeUint32LE(0x0000, 2);
+                client.send(msg);
+
+                return true;
+            }
+
+            case 0x00220231:
+            {
+
+                const roomIndexReq = body.length >= 2 ? body.readUInt16LE(0) : 0;
+                let password = '';
+                for (let i = 2; i + 1 < body.length; i += 2) {
+                    const code = body.readUInt16LE(i);
+                    if (code === 0) break;
+                    password += String.fromCharCode(code);
+                }
+
+                const accountId = Number(client.accountIndex_ || client.accountId_ || 1);
+                const room = rooms.getRoom(roomIndexReq);
+
+                const sendEnterSa = (ok) => {
+                    const [msg, respBody] = getExactMessageBuffer(0x00220232, 0x06);
+                    respBody.writeUInt16LE(ok ? 0 : 1, 0x00);
+                    respBody.writeUInt32LE(ok ? 0 : 1, 0x02);
+                    client.send(msg);
+                    console.log(`[ZGateGameDispatch] >> Sent Enter_SA 0x220232 (${ok ? 'success' : 'failure'}, room=${roomIndexReq})`);
+                };
+
+                if (!room) {
+                    console.log(`[ZGateGameDispatch] >> Enter_CQ: room #${roomIndexReq} not found`);
+                    sendEnterSa(false);
+                    return true;
+                }
+                if (room.hasPassword && room.password !== password) {
+                    console.log(`[ZGateGameDispatch] >> Enter_CQ: wrong password for room #${roomIndexReq}`);
+                    sendEnterSa(false);
+                    return true;
+                }
+
+                if (room.members.size >= room.maxPlayers) {
+                    console.log(`[ZGateGameDispatch] >> Enter_CQ: room #${roomIndexReq} full (${room.members.size}/${room.maxPlayers})`);
+                    sendEnterSa(false);
+                    return true;
+                }
+
+                const nickname = client.nickname_ || 'Player';
+                rooms.addMember(room.id, {
+                    accountId,
+                    nickname,
+
+                    team: 0,
+                    slot: 0,
+                    ready: false,
+                    client,
+                });
+
+                client.campaignRoom_ = room.campaign;
+                client.isTrueCampaign_ = room.isTrueCampaign;
+                client.createdRoomIndex_ = room.id;
+                client.roomIndex_ = 0;
+                client.maxPlayers_ = room.maxPlayers;
+                client.mapId_ = room.mapId;
+                client.roomName_ = room.name;
+
+                sendEnterSa(true);
+
+                const allMembers = Array.from(room.members.values());
+                const otherMembers = allMembers.filter((m) => m.accountId !== accountId);
+
+                setTimeout(() => {
+
+                    sendFullRoomStateToClient(client, room, accountId);
+                }, 350);
+
+                const joinerCtxSource = { accountId, nickname, team: 0, client };
+                for (const member of otherMembers) {
+                    if (!member.client) continue;
+                    sendRoomUserPackets(member.client, buildMemberUserCtx(joinerCtxSource), getExactMessageBuffer, { includeMaster: false });
+                }
+                console.log(`[ZGateGameDispatch] >> Notified ${otherMembers.length} existing room member(s) of new arrival (account=${accountId})`);
+
+                {
+                    broadcastRoomListChange(rooms.getLobbyClients(), room, 2, getExactMessageBuffer);
+                }
+
                 return true;
             }
 
@@ -620,34 +1185,185 @@ class ZGateGameDispatch
             case 0x00220221:
             {
                 clearPendingRoomStateRetries(client, 'map-change-one cq');
-                // Static analysis for ZDispatchRoom::Map_Change_One_CQ/SA shows
-                // the SA uses a 0x1A packet (0x0A body), not the generic 6-byte OK.
-                // When the body begins with zeroed status fields, the client-side
-                // SA path falls back to its retained room-map state and proceeds.
                 const incomingFields = parseMapChangeOneBody(body);
+
+                const inPveMapRange = incomingFields.w1 >= 9001 && incomingFields.w1 <= 9012;
+                if (inPveMapRange) {
+                    client.campaignMapCacheKey_ = incomingFields.w1;
+                }
+
+                if (inPveMapRange) {
+                    client.playRound_ = incomingFields.b5;
+
+                    client.mapChangeOneTime_ = incomingFields.w2;
+                    client.mapChangeOneRound_ = incomingFields.b5;
+                    client.mapChangeOneKill_ = incomingFields.w6;
+                    client.mapChangeOneGoal_ = incomingFields.w8;
+
+                    const roomForMapUpdate = rooms.getRoomByAccount(Number(client.accountIndex_ || client.accountId_ || 1));
+                    if (roomForMapUpdate) {
+                        rooms.updateRoomMapSelection(roomForMapUpdate.id, {
+                            mapId: incomingFields.w1,
+                            playTime: incomingFields.w2,
+                            playRound: incomingFields.b5,
+                        });
+                    }
+                }
                 const outgoingFields = buildMapChangeOneSaFields(body, client);
                 console.log(
                     `[ZGateGameDispatch] >> Room Map_Change_One_CQ ` +
                     `(b0=${incomingFields.b0}, w1=${incomingFields.w1}, w2=${incomingFields.w2}, ` +
                     `b5=${incomingFields.b5}, w6=${incomingFields.w6}, w8=${incomingFields.w8})`
                 );
-                const [msg, respBody] = getExactMessageBuffer(0x00220222, 0x0A);
-                writeMapChangeOneBody(respBody, outgoingFields);
+                const saHasSuccessHeader = true;
+                const saBodySize = saHasSuccessHeader ? 0x10 : 0x0A;
+                const saPayloadOffset = saHasSuccessHeader ? 0x06 : 0x00;
+                const [msg, respBody] = getExactMessageBuffer(0x00220222, saBodySize);
+                if (saHasSuccessHeader) {
+                    respBody.writeUInt16LE(0, 0x00);
+                    respBody.writeUInt32LE(0, 0x02);
+                }
+                writeMapChangeOneBody(respBody, outgoingFields, saPayloadOffset);
                 client.send(msg);
                 console.log(
                     `[ZGateGameDispatch] >> Sent Map_Change_One_SA 0x220222 ` +
-                    `(mode=${MAP_CHANGE_ONE_SA_EXPERIMENT.mode}, ` +
+                    `(mode=${MAP_CHANGE_ONE_SA_EXPERIMENT.mode}, bodySize=${saBodySize}, ` +
                     `b0=${outgoingFields.b0}, w1=${outgoingFields.w1}, w2=${outgoingFields.w2}, ` +
                     `b5=${outgoingFields.b5}, w6=${outgoingFields.w6}, w8=${outgoingFields.w8}, ` +
                     `hex=${respBody.toString('hex')})`
                 );
-                if (MAP_CHANGE_ONE_RESEND_MODE === 'full_room') {
-                    resendRoomState(client, 'after map-change-one cq');
-                } else if (MAP_CHANGE_ONE_RESEND_MODE === 'map_only') {
+                {
                     resendRoomMapOnly(client, 'after map-change-one cq');
-                } else {
-                    console.log(`[ZGateGameDispatch] >> Skipped resend after map-change-one cq (mode=${MAP_CHANGE_ONE_RESEND_MODE})`);
                 }
+
+                {
+                    const accountIdForBroadcast = Number(client.accountIndex_ || client.accountId_ || 1);
+                    const roomForBroadcast = rooms.getRoomByAccount(accountIdForBroadcast);
+                    if (roomForBroadcast && roomForBroadcast.hostAccountId === accountIdForBroadcast
+                        && roomForBroadcast.members.size > 1) {
+                        rooms.sendOthers(roomForBroadcast.id, accountIdForBroadcast, () => {
+                            const [snMsg, snBody] = getExactMessageBuffer(0x00220223, 0x0A);
+                            writeMapChangeOneBody(snBody, outgoingFields, 0);
+                            return snMsg;
+                        });
+                        console.log(
+                            `[ZGateGameDispatch] >> Broadcast Map_Change_One_SN 0x220223 to ` +
+                            `${roomForBroadcast.members.size - 1} other room member(s) of Room #${roomForBroadcast.id} ` +
+                            `(host=${accountIdForBroadcast})`
+                        );
+                    } else {
+                        console.log(
+                            `[ZGateGameDispatch] >> Skipped map-change broadcast (not host, no room, or no other members)`
+                        );
+                    }
+                }
+                return true;
+            }
+
+            case 0x00220234:
+            {
+
+                console.log(`[ZGateGameDispatch] >> 0x220234 (Leave_CQ): replying Leave_SA 0x220235`);
+                const [msg, respBody] = client.getMessageBuffer(0x00220235, 0x6);
+                respBody.writeUint16LE(0x0000, 0);
+                respBody.writeUint32LE(0x0000, 2);
+                client.send(msg);
+
+                require('./room.dispatch').resetRoomSessionState(client);
+                console.log(`[ZGateGameDispatch] >> Room state reset on Leave_CQ 0x220234`);
+
+                leaveRoomAndNotify(Number(client.accountIndex_ || client.accountId_ || 1));
+
+                return true;
+            }
+
+            case 0x00220337:
+            {
+
+                const targetAccountId = body.length >= 2 ? body.readUInt16LE(0) : 0;
+                const kickerAccountId = Number(client.accountIndex_ || client.accountId_ || 1);
+
+                const sendKickoutSa = (ok) => {
+                    const [msg, respBody] = getExactMessageBuffer(0x00220338, 0x06);
+                    respBody.writeUInt16LE(ok ? 0 : 1, 0x00);
+                    respBody.writeUInt32LE(ok ? 0 : 1, 0x02);
+                    client.send(msg);
+                    console.log(`[ZGateGameDispatch] >> Sent Kickout_SA 0x220338 (${ok ? 'success' : 'failure'}, kicker=${kickerAccountId}, target=${targetAccountId})`);
+                };
+
+                const room = rooms.getRoomByAccount(kickerAccountId);
+                if (!room || room.hostAccountId !== kickerAccountId) {
+                    console.log(`[ZGateGameDispatch] >> Kickout_CQ: account ${kickerAccountId} is not the host of any room, refusing`);
+                    sendKickoutSa(false);
+                    return true;
+                }
+                if (targetAccountId === kickerAccountId || !room.members.has(targetAccountId)) {
+                    console.log(`[ZGateGameDispatch] >> Kickout_CQ: target ${targetAccountId} is not a kickable member of room #${room.id}`);
+                    sendKickoutSa(false);
+                    return true;
+                }
+
+                const targetClient = room.members.get(targetAccountId).client;
+
+                sendKickoutSa(true);
+
+                if (targetClient) {
+                    const [leaveMsg, leaveBody] = getExactMessageBuffer(0x00220236, 0x03);
+                    leaveBody.writeUInt16LE(targetAccountId, 0x00);
+                    leaveBody.writeUInt8(1, 0x02);
+                    targetClient.send(leaveMsg);
+
+                    require('./room.dispatch').resetRoomSessionState(targetClient);
+                }
+                console.log(`[ZGateGameDispatch] >> Kickout_CQ: host ${kickerAccountId} kicked account ${targetAccountId} from room #${room.id}`);
+
+                leaveRoomAndNotify(targetAccountId, { kickout: true });
+
+                return true;
+            }
+
+            case CQ_ROOM_NAME_CHANGE:
+            {
+
+                const accountId = Number(client.accountIndex_ || client.accountId_ || 1);
+
+                const requestedName = decodeAnsiBytes(body.subarray(0, Math.min(body.length, 25)));
+
+                const sendNameChangeSa = (ok, name) => {
+                    const [msg, respBody] = getExactMessageBuffer(SA_ROOM_NAME_CHANGE, 0x06);
+                    respBody.writeUInt16LE(ok ? 0 : 1, 0x00);
+                    respBody.writeUInt32LE(ok ? 0 : 1, 0x02);
+                    client.send(msg);
+                    console.log(`[ZGateGameDispatch] >> Sent Name_Change_SA 0x220219 (${ok ? 'success' : 'failure'}, account=${accountId}${ok ? `, name="${name}"` : ''})`);
+                };
+
+                const room = rooms.getRoomByAccount(accountId);
+                if (!room || room.hostAccountId !== accountId) {
+                    console.log(`[ZGateGameDispatch] >> Name_Change_CQ: account ${accountId} is not the host of any room, refusing`);
+                    sendNameChangeSa(false);
+                    return true;
+                }
+                if (!requestedName) {
+                    console.log(`[ZGateGameDispatch] >> Name_Change_CQ: empty name from account ${accountId}, refusing`);
+                    sendNameChangeSa(false);
+                    return true;
+                }
+
+                room.name = requestedName;
+                client.roomName_ = requestedName;
+                sendNameChangeSa(true, requestedName);
+
+                for (const member of room.members.values()) {
+                    if (!member.client) continue;
+                    sendRoomNameOnly(member.client, requestedName, getExactMessageBuffer);
+                }
+                console.log(`[ZGateGameDispatch] >> Broadcast Room_Name_SN 0x22021A to room #${room.id} (${room.members.size} member(s)) [rename]`);
+
+                {
+                    broadcastRoomListChange(rooms.getLobbyClients(), room, 2, getExactMessageBuffer);
+                    console.log(`[ZGateGameDispatch] >> Broadcast room #${room.id} name change to the lobby`);
+                }
+
                 return true;
             }
 
@@ -657,12 +1373,72 @@ class ZGateGameDispatch
             case 0x00220215:
             {
                 console.log(`[ZGateGameDispatch] >> Room Option_Change_CQ`);
-                const [msg, respBody] = getExactMessageBuffer(0x00220216, 0x06);
-                respBody.writeUint16LE(0, 0x00);
-                respBody.writeUint32LE(0, 0x02);
+                {
+                    const [msg, respBody] = getExactMessageBuffer(0x00220216, 0x06);
+                    respBody.writeUint16LE(0, 0x00);
+                    respBody.writeUint32LE(0, 0x02);
+                    client.send(msg);
+                    console.log(`[ZGateGameDispatch] >> Sent Option_Change_SA 0x220216 (status=0, result=0)`);
+                    resendRoomState(client, 'after option-change cq');
+                    return true;
+                }
+
+            }
+
+            case 0x00220505:
+            case 0x00220503:
+            {
+                const accountId = Number(client.accountIndex_ || client.accountId_ || 1);
+
+                const chatModeForType = (type === 0x00220505) ? "enabled" : "disabled";
+                const room = (chatModeForType === 'enabled') ? rooms.getRoomByAccount(accountId) : undefined;
+
+                if (!room) {
+
+                    const [msg, respBody] = client.getMessageBuffer(type + 1, 0x6);
+                    respBody.writeUint16LE(0x0000, 0);
+                    respBody.writeUint32LE(0x0000, 2);
+                    client.send(msg);
+                    return true;
+                }
+
+                const channelName = (type === 0x00220505) ? 'All' : 'Team';
+                const textPreview = body.length > 2 ? body.subarray(2).toString('latin1').split('\0')[0] : '';
+                console.log(`[ZGateGameDispatch] >> Room chat ${channelName} (0x${type.toString(16).padStart(8, '0')}): "${textPreview}" (${body.length} bytes)`);
+
+                if (type === 0x00220505) {
+
+                    rooms.sendAll(room.id, () => {
+                        const [msg, respBody] = getExactMessageBuffer(type, body.length);
+                        body.copy(respBody);
+                        return msg;
+                    });
+                } else {
+
+                    const sender = room.members.get(accountId);
+                    const senderTeam = sender ? sender.team : 0;
+                    for (const member of room.members.values()) {
+                        if (member.team !== senderTeam) continue;
+                        if (!member.client) continue;
+                        const [msg, respBody] = getExactMessageBuffer(type, body.length);
+                        body.copy(respBody);
+                        member.client.send(msg);
+                    }
+                }
+                return true;
+            }
+
+            case 0x00220507:
+            case 0x00220509:
+            {
+
+                const channelName = (type === 0x00220507) ? 'Team' : 'All';
+                const textPreview = body.length > 2 ? body.subarray(2).toString('latin1').split('\0')[0] : '';
+                console.log(`[ZGateGameDispatch] >> In-game chat ${channelName} (0x${type.toString(16).padStart(8, '0')}): "${textPreview}" (${body.length} bytes)`);
+
+                const [msg, respBody] = getExactMessageBuffer(type, body.length);
+                body.copy(respBody);
                 client.send(msg);
-                console.log(`[ZGateGameDispatch] >> Sent Option_Change_SA 0x220216 (status=0, result=0)`);
-                resendRoomState(client, 'after option-change cq');
                 return true;
             }
 
@@ -682,3 +1458,9 @@ class ZGateGameDispatch
         }
     }
 };
+
+module.exports.getGameInfoRound = getGameInfoRound;
+
+module.exports.sendReadyHostSnToRoomMember = sendReadyHostSnToRoomMember;
+
+module.exports.buildReadyHostSnMsg = buildReadyHostSnMsg;

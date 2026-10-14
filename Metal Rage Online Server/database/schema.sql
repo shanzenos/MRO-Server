@@ -28,6 +28,9 @@ CREATE TABLE IF NOT EXISTS accounts (
     pilot           INT UNSIGNED    NOT NULL DEFAULT 101,-- Pilot avatar (101 or 102)
     account_level   TINYINT         NOT NULL DEFAULT 1,  -- 1=Spectator, 2=MC, 3=GM, 4=Dev
     gender          TINYINT         NOT NULL DEFAULT 1,  -- 1=Male, 2=Female
+    point           INT UNSIGNED NOT NULL DEFAULT 100000,
+    cash            INT UNSIGNED NOT NULL DEFAULT 0,
+    coupon          INT UNSIGNED NOT NULL DEFAULT 0,
     created_at      TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
     last_login      TIMESTAMP       NULL DEFAULT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -102,6 +105,17 @@ CREATE TABLE IF NOT EXISTS items (
 
     INDEX idx_account (account_id),
     FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+) ENGINE=InnoDB AUTO_INCREMENT=100001 DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS item_equips (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    account_id INT UNSIGNED NOT NULL,
+    item_id INT UNSIGNED NOT NULL,
+    mech_slot TINYINT NOT NULL,
+    part_slot TINYINT NOT NULL,
+    UNIQUE KEY equipped_slot (account_id, mech_slot, part_slot),
+    FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE,
+    FOREIGN KEY (item_id) REFERENCES items(id) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- =============================================
@@ -159,37 +173,78 @@ CREATE PROCEDURE create_new_player(
     IN p_pilot INT UNSIGNED
 )
 BEGIN
-    DECLARE v_account_id INT UNSIGNED;
+    DECLARE v_id INT UNSIGNED;
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        ROLLBACK;
+        RESIGNAL;
+    END;
+    START TRANSACTION;
 
     -- Create the account
     INSERT INTO accounts (username, nickname, pilot)
     VALUES (p_username, p_nickname, p_pilot);
+    SET v_id = LAST_INSERT_ID();
 
-    SET v_account_id = LAST_INSERT_ID();
+    -- Initialize player record
+    INSERT INTO records (account_id) VALUES (v_id);
 
-    -- Initialize player record (level 1, no stats)
-    INSERT INTO records (account_id)
-    VALUES (v_account_id);
-
-    -- Initialize all 8 mech levels at level 1
+    -- Initialize all 8 mech levels
     INSERT INTO mech_levels (account_id, mech_type) VALUES
-        (v_account_id, 1), (v_account_id, 2), (v_account_id, 3), (v_account_id, 4),
-        (v_account_id, 5), (v_account_id, 6), (v_account_id, 7), (v_account_id, 8);
+        (v_id, 1), (v_id, 2), (v_id, 3), (v_id, 4),
+        (v_id, 5), (v_id, 6), (v_id, 7), (v_id, 8);
 
     -- Give all 8 mech licenses (purchased) by default
-    -- In a real server you'd start with fewer and unlock via tutorials
     INSERT INTO mech_licenses (account_id, slot, mech_type, license_type) VALUES
-        (v_account_id, 0, 1, 1), (v_account_id, 1, 2, 1), (v_account_id, 2, 3, 1), (v_account_id, 3, 4, 1),
-        (v_account_id, 4, 5, 1), (v_account_id, 5, 6, 1), (v_account_id, 6, 7, 1), (v_account_id, 7, 8, 1);
+        (v_id, 0, 1, 1), (v_id, 1, 2, 1), (v_id, 2, 3, 1), (v_id, 3, 4, 1),
+        (v_id, 4, 5, 1), (v_id, 5, 6, 1), (v_id, 6, 7, 1), (v_id, 7, 8, 1);
 
     -- Unlock all 6 maps by default
     INSERT INTO maps (account_id, map_id) VALUES
-        (v_account_id, 0), (v_account_id, 1), (v_account_id, 2),
-        (v_account_id, 3), (v_account_id, 4), (v_account_id, 5);
+        (v_id, 0), (v_id, 1), (v_id, 2),
+        (v_id, 3), (v_id, 4), (v_id, 5);
 
     -- Initialize tutorial tracking (all incomplete)
     INSERT INTO tutorials (account_id, tutorial_id) VALUES
-        (v_account_id, 1), (v_account_id, 2), (v_account_id, 3), (v_account_id, 4);
+        (v_id, 1), (v_id, 2), (v_id, 3), (v_id, 4);
 
+-- Initial starter inventory drop linked to the newly generated account id
+    -- Slot configurations fixed (1=Primary, 2=Sub-weapon, 4=Booster) to match client network layout
+    INSERT INTO items (account_id, item_id, slot, mech_type, part_slot, quantity, equipped) VALUES
+        (v_id, 11100101, 0, 1, 0, 1, 1),
+        (v_id, 22100101, 1, 1, 1, 1, 1),
+        (v_id, 32100101, 2, 1, 2, 1, 1),
+        (v_id, 41100101, 4, 1, 4, 1, 1),
+        (v_id, 12100101, 0, 2, 0, 1, 1),
+        (v_id, 26300101, 1, 2, 1, 1, 1),
+        (v_id, 32100101, 2, 2, 2, 1, 1),
+        (v_id, 41100101, 4, 2, 4, 1, 1),
+        (v_id, 13100101, 0, 3, 0, 1, 1),
+        (v_id, 21200101, 1, 3, 1, 1, 1),
+        (v_id, 32100101, 2, 3, 2, 1, 1),
+        (v_id, 41100101, 4, 3, 4, 1, 1),
+        (v_id, 14200101, 0, 4, 0, 1, 1),
+        (v_id, 24100201, 1, 4, 1, 1, 1),
+        (v_id, 32100101, 2, 4, 2, 1, 1),
+        (v_id, 15200101, 0, 5, 0, 1, 1),
+        (v_id, 22200201, 1, 5, 1, 1, 1),
+        (v_id, 32100101, 2, 5, 2, 1, 1),
+        (v_id, 16200101, 0, 6, 0, 1, 1),
+        (v_id, 25300101, 1, 6, 1, 1, 1),
+        (v_id, 38500101, 2, 6, 2, 1, 1),
+        (v_id, 43100101, 4, 6, 4, 1, 1),
+        (v_id, 17100101, 0, 7, 0, 1, 1),
+        (v_id, 28100101, 1, 7, 1, 1, 1),
+        (v_id, 31100101, 2, 7, 2, 1, 1),
+        (v_id, 42100101, 4, 7, 4, 1, 1),
+        (v_id, 18100101, 0, 8, 0, 1, 1),
+        (v_id, 28300101, 1, 8, 1, 1, 1),
+        (v_id, 39100101, 2, 8, 2, 1, 1),
+        (v_id, 41100101, 4, 8, 4, 1, 1);
+
+    INSERT INTO item_equips (account_id, item_id, mech_slot, part_slot)
+    SELECT account_id, id, mech_type, part_slot FROM items WHERE account_id = v_id;  -- Mech 8 (Observation) Primary Weapon
+
+    COMMIT;
 END //
 DELIMITER ;
