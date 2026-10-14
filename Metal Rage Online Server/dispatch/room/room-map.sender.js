@@ -1,13 +1,104 @@
-﻿const SN_MAP_CHANGE_ALL = 0x00220226;
+
+
+const MAP_ALL_ENTRY_OFFSET = 0x02;
+
+function isMapAllSingleEntryEnabled() {
+    return true;
+}
+
+const SN_MAP_CHANGE_ALL = 0x00220226;
 const SN_MAP_CHANGE_ONE = 0x00220223;
 const SN_CAMPAIGN = 0x0023013A;
 
-function sendRoomMapPackets(client, ctx, getExactMessageBuffer) {
-    if (!client.isTrueCampaign_) {  // isTrueCampaign_ → campaignRoom_
+function resolveMapChangeOneSetting(candidates, fallback, max)
+{
+
+    for (const candidate of candidates) {
+        const value = Number(candidate);
+        if (Number.isInteger(value) && value >= 0 && value <= max) {
+            return value;
+        }
+    }
+    return fallback;
+}
+
+function sendMapChangeOnePacket(client, mapList, effectiveSelectedIdx, ctx, getExactMessageBuffer)
+{
+    const {
+        roomSettingGoal,
+        roomSettingTime,
+        roomSettingRound,
+
+        mapChangeOneTime,
+        mapChangeOneRound,
+        playRound,
+        mapChangeOneKill,
+        mapChangeOneGoal,
+    } = ctx;
+    const effectiveCacheKey = mapList[effectiveSelectedIdx] >>> 0;
+    const [msg, respBody] = getExactMessageBuffer(SN_MAP_CHANGE_ONE, 0x0A);
+    const mapTime = resolveMapChangeOneSetting(
+        [mapChangeOneTime, roomSettingTime], 0, 0xFFFF
+    );
+    const mapRound = resolveMapChangeOneSetting(
+        [mapChangeOneRound, playRound, roomSettingRound], 1, 0xFF
+    );
+    const mapKill = resolveMapChangeOneSetting(
+        [mapChangeOneKill, roomSettingGoal], 0, 0xFFFF
+    );
+    const mapGoal = resolveMapChangeOneSetting(
+        [mapChangeOneGoal, roomSettingGoal], 0, 0xFFFF
+    );
+    respBody.writeUint8(0, 0x00);
+    respBody.writeUint16LE(effectiveCacheKey, 0x01);
+    respBody.writeUint16LE(mapTime, 0x03);
+    respBody.writeUint8(mapRound, 0x05);
+    respBody.writeUint16LE(mapKill, 0x06);
+    respBody.writeUint16LE(mapGoal, 0x08);
+    client.send(msg);
+    console.log(`[ZRoomDispatch] >> Sent SN_MAP_CHANGE_ONE 0x220223 (slot=0, cacheKey=${effectiveCacheKey}, time=${mapTime}, round=${mapRound}, kill=${mapKill}, goal=${mapGoal})`);
+}
+
+function sendMapChangeAllPacket(client, mapList, effectiveSelectedIdx, campaignMapCacheKey, getExactMessageBuffer, sendTwice)
+{
+    const count = mapList.length;
+    const bodySize = MAP_ALL_ENTRY_OFFSET + count * 9;
+    const [msgAll, bodyAll] = getExactMessageBuffer(SN_MAP_CHANGE_ALL, bodySize);
+    // byte[0]=0(flag), byte[1]=count — 클라이언트 파서 기대 포맷 (expected format by the client parser)
+    bodyAll.writeUint8(0, 0x00);
+    bodyAll.writeUint8(count, 0x01);
+    if (MAP_ALL_ENTRY_OFFSET === 0x06)
+        bodyAll.writeUint32LE(0, 0x02);
+    for (let i = 0; i < count; i++) {
+        const entryOffset = MAP_ALL_ENTRY_OFFSET + (i * 9);
+        const cacheIndex = mapList[i] >>> 0;
+        bodyAll.writeUint16LE(cacheIndex, entryOffset + 0x00);
+        bodyAll.writeUint16LE(0, entryOffset + 0x02);
+        bodyAll.writeUint8(i === effectiveSelectedIdx ? 1 : 0, entryOffset + 0x04);
+        bodyAll.writeUint16LE(0, entryOffset + 0x05);
+        bodyAll.writeUint16LE(0, entryOffset + 0x07);
+    }
+    client.send(msgAll);
+
+    if (sendTwice) {
+        client.send(msgAll);
+        console.log(`[ZRoomDispatch] >> Sent SN_MAP_CHANGE_ALL 0x220226 again (NETWORK_ROOM_INFO fires before the write)`);
+    }
+
+    console.log(`[ZRoomDispatch] >> Sent SN_MAP_CHANGE_ALL 0x220226 (count=${count}, selectedIdx=${effectiveSelectedIdx}, mapId=${campaignMapCacheKey}, header=${"compact"}, body=0x${bodySize.toString(16)})`);
+}
+
+function sendRoomMapPackets(client, ctx, getExactMessageBuffer, options = {}) {
+
+    if (!ctx.isTrueCampaign) {
         return;
     }
 
-    const { campaignMapCacheKey, campaignMapHints, roomDefaultEntryHints } = ctx;
+    const {
+        campaignMapCacheKey,
+        campaignMapHints,
+        roomDefaultEntryHints,
+    } = ctx;
 
     const mapList = (campaignMapHints && campaignMapHints.length > 0)
         ? campaignMapHints
@@ -17,38 +108,25 @@ function sendRoomMapPackets(client, ctx, getExactMessageBuffer) {
 
     const selectedIdx = mapList.indexOf(Number(campaignMapCacheKey));
     const effectiveSelectedIdx = selectedIdx >= 0 ? selectedIdx : 0;
+    const sendSupplementalAll = false;
 
-    const bodySize = 6 + count * 9;
-    {
-        const [msgAll, bodyAll] = getExactMessageBuffer(SN_MAP_CHANGE_ALL, bodySize);
-        // byte[0]=0(flag), byte[1]=count — 클라이언트 파서 기대 포맷 (expected format by the client parser)
-        bodyAll.writeUint8(0, 0x00);
-        bodyAll.writeUint8(count, 0x01);
-        bodyAll.writeUint32LE(0, 0x02);
-        for (let i = 0; i < count; i++) {
-            const entryOffset = 0x06 + (i * 9);
-            const cacheIndex = mapList[i] >>> 0;
-            bodyAll.writeUint16LE(cacheIndex, entryOffset + 0x00);
-            bodyAll.writeUint16LE(0, entryOffset + 0x02);
-            bodyAll.writeUint8(i === effectiveSelectedIdx ? 1 : 0, entryOffset + 0x04);
-            bodyAll.writeUint16LE(0, entryOffset + 0x05);
-            bodyAll.writeUint16LE(0, entryOffset + 0x07);
-        }
-        client.send(msgAll);
-        console.log(`[ZRoomDispatch] >> Sent SN_MAP_CHANGE_ALL 0x220226 (count=${count}, selectedIdx=${effectiveSelectedIdx}, cacheKey=${campaignMapCacheKey})`);
-    }
+    const allMapList = isMapAllSingleEntryEnabled()
+        ? [mapList[effectiveSelectedIdx]]
+        : mapList;
+    const allEffectiveSelectedIdx = isMapAllSingleEntryEnabled()
+        ? 0
+        : effectiveSelectedIdx;
 
-    {
-        const effectiveCacheKey = mapList[effectiveSelectedIdx] >>> 0;
-        const [msg, respBody] = getExactMessageBuffer(SN_MAP_CHANGE_ONE, 0x0A);
-        respBody.writeUint8(0, 0x00);
-        respBody.writeUint16LE(effectiveCacheKey, 0x01);
-        respBody.writeUint16LE(0, 0x03);
-        respBody.writeUint8(1, 0x05);
-        respBody.writeUint16LE(0, 0x06);
-        respBody.writeUint16LE(0, 0x08);
-        client.send(msg);
-        console.log(`[ZRoomDispatch] >> Sent SN_MAP_CHANGE_ONE 0x220223 (slot=0, cacheKey=${effectiveCacheKey})`);
+    sendMapChangeAllPacket(
+        client, allMapList, allEffectiveSelectedIdx, campaignMapCacheKey,
+        getExactMessageBuffer, true
+    );
+    sendMapChangeOnePacket(client, mapList, effectiveSelectedIdx, ctx, getExactMessageBuffer);
+    if (sendSupplementalAll) {
+        sendMapChangeAllPacket(
+            client, allMapList, allEffectiveSelectedIdx, campaignMapCacheKey,
+            getExactMessageBuffer, false
+        );
     }
 }
 
@@ -77,7 +155,4 @@ function sendCampaignBootstrap(client, getExactMessageBuffer) {
     console.log(`[ZRoomDispatch] >> Sent Campaign_SN 0x23013A (action=1)`);
 }
 
-module.exports = {
-    sendRoomMapPackets,
-    sendCampaignBootstrap,
-};
+module.exports = { sendRoomMapPackets, sendCampaignBootstrap };

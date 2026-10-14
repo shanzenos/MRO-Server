@@ -1,4 +1,5 @@
 const NetworkClient = require("../client");
+const authTokens = require("../auth-tokens");
 
 // ZDispatchGate - Handles server/channel gateway
 //
@@ -58,12 +59,15 @@ class ZGateDispatch
             case CQ_LEAVE:
             {
                 console.log(`[ZGateDispatch] Gate leave request (${body.length} bytes)`);
+                const accountId = client.accountId_;
+                if (!accountId) { client.disconnect(); return true; }
+                const key = authTokens.issueKey(accountId);
 
                 const [msg, respBody] = client.getMessageBuffer(SA_LEAVE, 0xE);
                 respBody.writeUint16LE(0x0000, 0); // EventMessage = OK
                 respBody.writeUint32LE(0x0000, 2); // ErrorMessage = OK
-                respBody.writeUint32LE(0x0, 6);
-                respBody.writeUint32LE(0x0, 10);
+                respBody.writeUint32LE(accountId, 6);
+                respBody.writeUint32LE(key, 10);
                 client.send(msg);
 
                 return true;

@@ -12,8 +12,8 @@ const MSG_TIME_SYNC = 0x00020082;
 const MSG_KEEP_ALIVE = 0x00020083;
 const MSG_ACKNOWLEDGE = 0x00020084;
 
-module.exports = 
-class NetworkClient 
+module.exports =
+class NetworkClient
 {
     /**
      * Creates a network client from a socket and dispatch callback
@@ -49,7 +49,14 @@ class NetworkClient
         /** @private {DispatchCallback} - Dispatch callback for received messages */
         this.callback_ = callback;
 
-        socket.on('data', (data) => this.onData(data));
+        socket.on('data', (data) => {
+            try {
+                this.onData(data);
+            } catch (err) {
+                console.error('[NetworkClient] Packet error:', err.message);
+                socket.destroy();
+            }
+        });
     }
 
     /**
@@ -63,14 +70,14 @@ class NetworkClient
         // or Date.now() for milliseconds since epoch (cheap, no allocation).
         // The original used getMilliseconds() which only returns 0-999 (ms within the current second),
         // not total elapsed time. Date.now() returns absolute ms since epoch.
-        return Date.now() - this.start_;
+        return this.start_ === 0 ? 0 : (Date.now() - this.start_) >>> 0;
     }
 
     /**
      * Reserves a network message from internal buffer
      * *Only one message can be acquired at a time*
      * @public
-     * @param {number} type - The type of network message 
+     * @param {number} type - The type of network message
      * @param {number} size - The size of the data contained by the message
      * @returns {[Buffer, Buffer]} - Tuple containing message and body subarray buffers
      */
@@ -80,12 +87,13 @@ class NetworkClient
         if (size % 0x10 != 0)
             size += 0x10 - (size % 0x10);
 
+        if (size > 0x400) throw new RangeError('Client frame exceeds 1024 bytes');
         const msg = this.sndbuf_.subarray(0, size);
-        
+
         msg.fill(0);
         msg.writeUint16BE(size, 0x6);
         msg.writeUint32BE(type, 0xC);
-        
+
         return [msg, msg.subarray(MSG_HEADER_SIZE)];
     }
 
@@ -196,13 +204,8 @@ class NetworkClient
             if (this.recvbuf_.length < len)
                 return;
 
-            // Determine how many bytes to consume: use padded size if available
-            let consumeLen = len;
-            let paddedLen = len;
-            if (paddedLen % 0x10 !== 0)
-                paddedLen += 0x10 - (paddedLen % 0x10);
-            if (this.recvbuf_.length >= paddedLen)
-                consumeLen = paddedLen;
+            // Client frames are not padded; consume only the declared length.
+            const consumeLen = len;
 
             // Use exact message length for CRC (client computes CRC over actual bytes, not padding)
             const msgBuf = Buffer.from(this.recvbuf_.subarray(0, len));
@@ -219,7 +222,7 @@ class NetworkClient
 
             console.log(`[NetworkClient] RECV: 0x${type.toString(16).padStart(8, '0')} len=0x${len.toString(16)} body=${body.length}b`);
 
-            if (type & 0x80)
+            if ((type >>> 16) === 0x0002)
             {
                 this.onInternalMessage(type, body);
             }
@@ -235,10 +238,12 @@ class NetworkClient
     /**
      * Sends a network message to the client
      * @public
-     * @param {Buffer} data - Network message to send to the client 
+     * @param {Buffer} data - Network message to send to the client
      */
     send(data)
     {
+        if (this.socket_.destroyed || this.socket_.writableEnded) return;
+        if (data.length > 0x400) throw new RangeError('Client frame exceeds 1024 bytes');
         const copy = Buffer.from(data);
         pack(copy, this.salt_);
         this.socket_.write(copy);

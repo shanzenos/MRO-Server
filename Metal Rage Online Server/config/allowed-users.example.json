@@ -1,0 +1,5 @@
+{
+    "users": [
+        { "name": "Player", "hostAddress": "127.0.0.1" }
+    ]
+}

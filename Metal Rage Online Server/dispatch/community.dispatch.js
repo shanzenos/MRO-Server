@@ -1,6 +1,10 @@
 const NetworkClient = require("../client");
+
 const db = require('../database/db');
 const { MAX_SLOT_COUNT } = require('../datatypes/enums');
+
+const rooms = require('../rooms.js');
+const whitelist = require('../config/whitelist.js');
 
 function catalogCategoryType(row) {
     const category = Number(row.category_type) || 2;
@@ -20,8 +24,6 @@ function getExactMessageBuffer(type, bodySize) {
 }
 
 function sendReadySuccessAndBeginRound(client, sourceTag) {
-    const BEGIN_ROUND_DELAY_MS = 6000;
-
     {
         const [msg, respBody] = client.getMessageBuffer(0x00420116, 0x6);
         respBody.writeUint16LE(0x0000, 0);
@@ -29,31 +31,6 @@ function sendReadySuccessAndBeginRound(client, sourceTag) {
         client.send(msg);
         console.log(`[ZDispatchWaiting] >> Sent 0x00420116 after ${sourceTag}`);
     }
-
-    setTimeout(() => {
-        // BeginRound_SN — 실제 서버는 IP:Port/MapName 형식으로 ClientTravel (real server ClientTravels in IP:Port/MapName format)
-        // Cache.Bin 인덱스 → 맵 파일명 변환 (Cache.Bin index → map filename conversion)
-        const CACHE_INDEX_TO_MAP_NAME = {
-            58: 'Map_PC01', 70: 'Map_PC02', 64: 'Map_PC03', 77: 'Map_PC04',
-            8: 'Map_C01', 34: 'Map_C02', 83: 'Map_C03', 32: 'Map_C04',
-            6: 'Map_C06', 2: 'Map_C08', 56: 'Map_C08_R', 26: 'Map_C09',
-            36: 'Map_C18', 43: 'Map_C19', 16: 'Map_C20', 24: 'Map_C21',
-            45: 'Map_C22', 47: 'Map_C25', 49: 'Map_C30',
-            14: 'Map_N01', 54: 'Map_N01_R', 10: 'Map_N05', 22: 'Map_N07',
-            52: 'Map_N11', 30: 'Map_N13', 18: 'Map_N17',
-            1: 'Map_Ptuto', 4: 'Map_Ptuto2',
-        };
-        const mapCacheKey = Number(client.campaignMapCacheKey_) || 58;
-        const mapName = CACHE_INDEX_TO_MAP_NAME[mapCacheKey] || 'Map_PC01';
-        // body: u16 0, u16 0, map name null-terminated string
-        const mapNameBuf = Buffer.from(mapName + '\0', 'ascii');
-        const [msg, respBody] = client.getMessageBuffer(0x00230152, 4 + mapNameBuf.length);
-        respBody.writeUint16LE(0, 0);
-        respBody.writeUint16LE(0, 2);
-        mapNameBuf.copy(respBody, 4);
-        client.send(msg);
-        console.log(`[ZDispatchWaiting] >> Sent 0x00230152 after ${sourceTag} (${BEGIN_ROUND_DELAY_MS}ms delay) map=${mapName}`);
-    }, BEGIN_ROUND_DELAY_MS);
 }
 
 // ZDispatchCommunity + ZDispatchFriend + other social services
@@ -133,8 +110,7 @@ class ZCommunityDispatch
 
         // 0x310101 = Hangar Open CQ from client → respond with shop data
         if (type === 0x00310101) {
-            this.handleHangarOpen(client);
-            return true;
+            return this.handleHangarOpen(client).then(() => true);
         }
 
         // 0x310216 = client ready for cash shop
@@ -147,7 +123,45 @@ class ZCommunityDispatch
         // Static analysis shows the client constructs 0x420114 after Ready_Host_SN.
         if (type === 0x00420114) {
             console.log(`[ZDispatchWaiting] >> Ready_Host_CA-like packet 0x00420114 body=${body.toString('hex')}`);
-            sendReadySuccessAndBeginRound(client, '0x00420114');
+            let suppressHostSuccess = false;
+
+            const accountId = Number(client.accountIndex_ || client.accountId_ || 1);
+            const room = rooms.getRoomByAccount(accountId);
+            if (room && accountId === room.hostAccountId && room.members.size > 1) {
+                if (body.length < 8) {
+
+                    console.error(`[ZDispatchWaiting] !! Ready_Host_CA malformed (${body.length} bytes, need >= 8) for room #${room.id} -- sending NOTHING to anyone, not even the host's own Ready_Success_SN`);
+                    suppressHostSuccess = true;
+                } else {
+                    const resultCode = body.readUInt32LE(0x02);
+                    const port = body.readUInt16LE(0x06);
+
+                    if (resultCode !== 0) {
+
+                        console.error(`[ZDispatchWaiting] !! Ready_Host_CA result=0x${(resultCode >>> 0).toString(16)} (host Listen failed) for room #${room.id} -- sending NOTHING to anyone, not even the host's own Ready_Success_SN`);
+                        suppressHostSuccess = true;
+                    } else {
+                        const hostAddress = client.username_ ? whitelist.getHostAddress(client.username_) : null;
+                        if (!hostAddress) {
+                            console.error(`[ZDispatchWaiting] !! no hostAddress configured for host account=${accountId} (username=${client.username_}), room #${room.id} -- not sending Ready_Host_SN to ${room.members.size - 1} non-host member(s)`);
+                        } else {
+                            const { sendReadyHostSnToRoomMember } = require('./gate.game.dispatch.js');
+                            const mapCacheKey = Number(room.mapId) || 58;
+                            for (const member of room.members.values()) {
+                                if (member.accountId === room.hostAccountId) continue;
+                                if (!member.client) continue;
+                                sendReadyHostSnToRoomMember(member.client, hostAddress, port, mapCacheKey);
+
+                                sendReadySuccessAndBeginRound(member.client, '0x00420114 (non-host, after Ready_Host_SN)');
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (!suppressHostSuccess) {
+                sendReadySuccessAndBeginRound(client, '0x00420114');
+            }
             return true;
         }
 
@@ -225,10 +239,16 @@ class ZCommunityDispatch
         }
 
         // Step 2: SN_GRADE_INFO
+
         {
-            const [msg, respBody] = getExactMessageBuffer(0x00510101, 4);
-            respBody.writeUInt32LE(11, 0);
-            client.send(msg);
+            const gradeValue = 0;
+            if (gradeValue !== 0) {
+                console.error(`[ZDispatchHangar] !! Grade_Info_SN assertion failed: value=${gradeValue}, must be 0 -- refusing to send`);
+            } else {
+                const [msg, respBody] = getExactMessageBuffer(0x00510101, 4);
+                respBody.writeUInt32LE(gradeValue, 0);
+                client.send(msg);
+            }
         }
 
         // Step 3: ShopList — 0x310201 per item (DLL handler at 0x0E6A90, patched)
