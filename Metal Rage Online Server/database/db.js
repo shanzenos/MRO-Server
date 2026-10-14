@@ -1,4 +1,6 @@
 const mysql = require('mysql2/promise');
+const fs = require('fs');
+const path = require('path');
 const { getShareType } = require('./item-share-type');
 
 // Load DB config from config.json (editable per-machine)
@@ -19,6 +21,40 @@ const pool = mysql.createPool({
 
     timezone: 'Z',
 });
+
+let shopCatalogInitialization;
+
+async function ensureShopCatalog()
+{
+    if (!shopCatalogInitialization) {
+        shopCatalogInitialization = (async () => {
+            const sql = fs.readFileSync(path.join(__dirname, 'shop-catalog.sql'), 'utf8');
+            const statements = sql.split(';').map(statement => statement.trim()).filter(Boolean);
+            for (const statement of statements.slice(0, 2)) await pool.query(statement);
+            const [beforeCatalog] = await pool.query('SELECT item_id FROM catalog');
+            const [beforeNames] = await pool.query('SELECT item_id FROM item_catalog');
+            for (const statement of statements.slice(2)) await pool.query(statement);
+            const catalogIds = new Set(beforeCatalog.map(row => Number(row.item_id)));
+            const nameIds = new Set(beforeNames.map(row => Number(row.item_id)));
+            const [catalog] = await pool.query('SELECT c.item_id, c.category_type, c.mech_type, c.price, ic.code, ic.name, ic.category FROM catalog c LEFT JOIN item_catalog ic ON ic.item_id = c.item_id ORDER BY c.item_id');
+            const added = catalog.filter(row => !catalogIds.has(Number(row.item_id)) || (row.code && !nameIds.has(Number(row.item_id))));
+            if (added.length) {
+                const logDir = path.join(__dirname, '..', 'logs');
+                fs.mkdirSync(logDir, { recursive: true });
+                const lines = [`[${new Date().toISOString()}] Added ${added.length} shop catalog entries`];
+                for (const item of added) {
+                    lines.push(`item_id=${item.item_id} category_type=${item.category_type} mech_type=${item.mech_type} price=${item.price} code=${item.code || ''} name=${item.name || ''} category=${item.category || ''}`);
+                }
+                fs.appendFileSync(path.join(logDir, 'shop-catalog.txt'), `${lines.join('\n')}\n`, 'utf8');
+            }
+            console.log(`[DB] Shop catalog ready: ${catalog.length} entries, added ${added.length}`);
+        })().catch(err => {
+            shopCatalogInitialization = null;
+            throw err;
+        });
+    }
+    return shopCatalogInitialization;
+}
 
 async function verifyConnection()
 {
@@ -213,7 +249,7 @@ async function createAccount(username, nickname, pilot)
         await conn.beginTransaction();
 
         const [result] = await conn.execute(
-            'INSERT INTO accounts (username, nickname, pilot, account_level) VALUES (?, ?, ?, 4)',
+            'INSERT INTO accounts (username, nickname, pilot) VALUES (?, ?, ?)',
             [username, nickname, pilot]
         );
         const accountId = result.insertId;
@@ -351,6 +387,7 @@ async function updateLastLogin(accountId)
 
 async function getItemCatalog()
 {
+    await ensureShopCatalog();
     const [rows] = await pool.execute(
         `SELECT
             c.item_id,
@@ -369,4 +406,4 @@ async function getItemCatalog()
     return rows;
 }
 
-module.exports = { pool, verifyConnection, getAccountByUsername, getAccountByNickname, getAccountById, getRecord, getMechLevels, getMechLicenses, getMaps, getTutorials, getItems, getItemEquips, getItemsWithEquipViews, getItemCatalog, createAccount, saveEquippedLoadout, completeTutorial, updateLastLogin };
+module.exports = { pool, verifyConnection, getAccountByUsername, getAccountByNickname, getAccountById, getRecord, getMechLevels, getMechLicenses, getMaps, getTutorials, getItems, getItemEquips, getItemsWithEquipViews, getItemCatalog, ensureShopCatalog, createAccount, saveEquippedLoadout, completeTutorial, updateLastLogin };
