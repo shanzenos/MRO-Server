@@ -182,34 +182,33 @@ class ZAccountDispatch
             //Store username on client
             client.username_ = username;
 
-            const account = await db.getAccountByUsername(username);
-            let resolvedAccount = account;
-            if (!resolvedAccount) {
+            let account = await db.getAccountByUsername(username);
+            if (!account) {
                 if (!username || username.length > 25) {
                     client.disconnect();
                     return;
                 }
                 try {
                     const accountId = await db.createAccount(username, username, 101);
-                    resolvedAccount = await db.getAccountById(accountId);
+                    account = await db.getAccountById(accountId);
                     console.log(`[ZDispatchAccount::CQ_LOGIN_WASABII] Auto-registered account #${accountId} "${username}"`);
                 } catch (err) {
                     if (err.code !== 'ER_DUP_ENTRY') throw err;
-                    resolvedAccount = await db.getAccountByUsername(username);
-                    if (!resolvedAccount) {
+                    account = await db.getAccountByUsername(username);
+                    if (!account) {
                         const nickname = `${username.slice(0, 14)}_${Date.now().toString(36)}`;
                         const accountId = await db.createAccount(username, nickname, 101);
-                        resolvedAccount = await db.getAccountById(accountId);
+                        account = await db.getAccountById(accountId);
                         console.log(`[ZDispatchAccount::CQ_LOGIN_WASABII] Auto-registered account #${accountId} "${username}"`);
                     }
                 }
             }
 
             // Account exists - send full data from DB
-            console.log(`[ZDispatchAccount::CQ_LOGIN_WASABII] Found account #${resolvedAccount.id} "${resolvedAccount.nickname}"`);
-            await db.updateLastLogin(resolvedAccount.id);
-            client.accountId_ = resolvedAccount.id;
-            client.nickname_ = resolvedAccount.nickname;
+            console.log(`[ZDispatchAccount::CQ_LOGIN_WASABII] Found account #${account.id} "${account.nickname}"`);
+            await db.updateLastLogin(account.id);
+            client.accountId_ = account.id;
+            client.nickname_ = account.nickname;
 
             {
                 const [msg, respBody] = client.getMessageBuffer(SA_LOGIN_WASABII, 0x6);
@@ -218,7 +217,7 @@ class ZAccountDispatch
                 client.send(msg);
             }
 
-            await this.sendAccountData(client, resolvedAccount);
+            await this.sendAccountData(client, account);
 
         } catch (err) {
 

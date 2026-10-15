@@ -311,7 +311,7 @@ class ZLobbyDispatch
                 victimStats.deaths++;
 
                 let teamScores = [0, 0];
-                if (roomForDeath && !roomForDeath.isTrueCampaign && Number(roomForDeath.rawRoomType) === 2) {
+                if (rooms.isPvpRoom(roomForDeath)) {
                     if (!Array.isArray(roomForDeath.teamScores)) roomForDeath.teamScores = [0, 0];
                     const attacker = roomForDeath.members.get(attackerIndex);
                     const victim = roomForDeath.members.get(victimIndex);
@@ -388,20 +388,18 @@ class ZLobbyDispatch
                 const mapId = body.length >= 10 ? body.readUint32LE(6) : (mapSeed || 1);
                 const requestedMaxPlayers = body.length > 0x0B ? body[0x0B] : 8;
                 const gameMode = body.length > 0x0C ? body[0x0C] : 0;
-                const isCampaignLike = roomType === 2 || gameMode === 5 || (roomType === 1 && gameMode === 4);
-                const isTrueCampaign = isCampaignLike;  // 로비 경로에서는 campaignLike=trueCampaign (in the lobby path, campaignLike=trueCampaign)
-                const effectiveRoomType = isCampaignLike ? 2 : roomType;
+                const campaignRoom = roomType === 2 || gameMode === 5 || (roomType === 1 && gameMode === 4);
+                const effectiveRoomType = campaignRoom ? 2 : roomType;
                 client.roomIndex_ = client.roomIndex_ || 1;
                 client.roomType_ = effectiveRoomType;
                 client.rawRoomType_ = roomType;
                 client.mapId_ = mapId;
                 client.mapSeed_ = mapSeed;
-                client.maxPlayers_ = isCampaignLike
+                client.maxPlayers_ = campaignRoom
                     ? Math.min(Math.max(requestedMaxPlayers || 4, 1), 4)
                     : Math.min(Math.max(requestedMaxPlayers || 8, 1), 8);
                 client.gameMode_ = gameMode;
-                client.campaignRoom_ = isCampaignLike;
-                client.isTrueCampaign_ = isTrueCampaign;
+                client.campaignRoom_ = campaignRoom;
 
                 const [msg, respBody] = client.getMessageBuffer(0x00230132, 0x6);
                 respBody.writeUint16LE(0x0000, 0);

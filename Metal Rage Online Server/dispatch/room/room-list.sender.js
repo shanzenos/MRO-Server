@@ -9,6 +9,7 @@ const SAFETY_MARGIN_BYTES = 0x20;
 const MAX_ENTRIES_BYTES = MAX_FRAME_BYTES - FRAME_HEADER_BYTES - LIST_HEADER_BYTES - SAFETY_MARGIN_BYTES;
 
 const { toRoomNameWireBytes } = require('./room-string');
+const rooms = require('../../rooms');
 
 const FIELD_BIT = {
     ROOM_TYPE: 1 << 0,
@@ -47,7 +48,7 @@ function buildRoomListEntry(room, updateType) {
     }
     buf.writeUInt16LE(FULL_FIELD_MASK, off); off += 2;
 
-    const rawRoomType = !room.isTrueCampaign && Number(room.rawRoomType) === 2
+    const rawRoomType = rooms.isPvpRoom(room)
         ? 2
         : (ROOM_TYPE_NORM_TO_RAW[room.roomType] ?? 0);
     buf.writeUInt8(rawRoomType & 0xFF, off); off += 1;

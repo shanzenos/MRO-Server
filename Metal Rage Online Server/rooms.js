@@ -24,7 +24,7 @@ function allocateRoomId() {
 
 function createRoom({
     id, name, mapId, playTime, playRound, maxPlayers, maxPlayersWire, campaign, hostAccountId, roomType, hasPassword, password,
-    rawRoomType, isTrueCampaign, gameMode, optionMask, createMapId, mapChangeOneKill, mapChangeOneGoal,
+    rawRoomType, gameMode, optionMask, createMapId, mapChangeOneKill, mapChangeOneGoal,
 }) {
     const room = {
         id,
@@ -32,11 +32,11 @@ function createRoom({
         mapId,
         playTime,
         playRound,
-        mapChangeOneKill: mapChangeOneKill == null ? (isTrueCampaign ? 0 : 1) : mapChangeOneKill,
-        mapChangeOneGoal: mapChangeOneGoal == null ? (isTrueCampaign ? 0 : 1) : mapChangeOneGoal,
+        mapChangeOneKill: mapChangeOneKill == null ? (campaign ? 0 : 1) : mapChangeOneKill,
+        mapChangeOneGoal: mapChangeOneGoal == null ? (campaign ? 0 : 1) : mapChangeOneGoal,
         maxPlayers,
         maxPlayersWire: maxPlayersWire == null ? maxPlayers : maxPlayersWire,
-        campaign,
+        campaign: !!campaign,
         hostAccountId,
 
         roomType: roomType || 0,
@@ -44,7 +44,6 @@ function createRoom({
         password: password || '',
 
         rawRoomType: rawRoomType || 0,
-        isTrueCampaign: !!isTrueCampaign,
         gameMode: gameMode || 0,
         optionMask: (optionMask >>> 0) || 0,
 
@@ -71,6 +70,13 @@ function getRoomByAccount(accountId) {
 
 function getRoom(roomId) {
     return rooms.get(roomId);
+}
+
+function isPvpRoom(roomOrClient) {
+    if (!roomOrClient) return false;
+    const campaign = roomOrClient.campaign ?? roomOrClient.campaignRoom_;
+    const rawRoomType = roomOrClient.rawRoomType ?? roomOrClient.rawRoomType_;
+    return !campaign && Number(rawRoomType) === 2;
 }
 
 function setHost(roomId, accountId) {
@@ -159,4 +165,4 @@ function sendOthers(roomId, exceptAccountId, build) {
     }
 }
 
-module.exports = { allocateRoomId, createRoom, getRoomByAccount, getRoom, setHost, updateRoomMapSelection, addMember, removeMember, setMemberClient, listRooms, sendAll, sendOthers, registerLobbyClientSource, getLobbyClients };
+module.exports = { allocateRoomId, createRoom, getRoomByAccount, getRoom, isPvpRoom, setHost, updateRoomMapSelection, addMember, removeMember, setMemberClient, listRooms, sendAll, sendOthers, registerLobbyClientSource, getLobbyClients };

@@ -90,7 +90,7 @@ function sendMapChangeAllPacket(client, mapList, effectiveSelectedIdx, campaignM
 
 function sendRoomMapPackets(client, ctx, getExactMessageBuffer, options = {}) {
 
-    if (!ctx.isTrueCampaign && !ctx.isPvpRoom) {
+    if (!ctx.isCampaignRoom && !ctx.isPvpRoom) {
         return;
     }
 
