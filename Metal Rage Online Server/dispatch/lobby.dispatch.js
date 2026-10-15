@@ -154,6 +154,9 @@ class ZLobbyDispatch
                     roomForBeginRound.beginRoundGen = (roomForBeginRound.beginRoundGen || 0) + 1;
 
                     roomForBeginRound.battleStats = new Map();
+                    roomForBeginRound.teamScores = [0, 0];
+                    roomForBeginRound.state = 'playing';
+                    broadcastRoomListChange(rooms.getLobbyClients(), roomForBeginRound, 2, getExactMessageBuffer);
 
                     client.battleStats_ = {};
 
@@ -236,6 +239,23 @@ class ZLobbyDispatch
                         return msg;
                     });
                     console.log(`[ZLobbyDispatch] >> Campaign_CN action=${action} -> Broadcast EndGame_SN 0x00222213 (winTeam=${winTeam}) to room #${roomForCampaign.id} (${roomForCampaign.members.size} member(s))`);
+                    roomForCampaign.state = 'lobby';
+                    roomForCampaign.battleStartGen = (roomForCampaign.battleStartGen || 0) + 1;
+                    for (const member of roomForCampaign.members.values()) {
+                        member.ready = false;
+                        if (member.client) member.client.gameStarted_ = false;
+                    }
+                    for (const member of roomForCampaign.members.values()) {
+                        rooms.sendAll(roomForCampaign.id, () => {
+                            const [stateMsg, stateBody] = getExactMessageBuffer(0x00220401, 0x08);
+                            stateBody.writeUInt8(0, 0x00);
+                            stateBody.writeUInt8(1, 0x01);
+                            stateBody.writeUInt16LE(member.accountId, 0x02);
+                            stateBody.writeUInt32LE(1, 0x04);
+                            return stateMsg;
+                        });
+                    }
+                    broadcastRoomListChange(rooms.getLobbyClients(), roomForCampaign, 2, getExactMessageBuffer);
                 } else {
                     const [msg, eb] = client.getMessageBuffer(0x00222213, 0x1E);
                     eb.writeUInt16LE(winTeam, 0x00);
@@ -290,12 +310,25 @@ class ZLobbyDispatch
                     killerStats.kills++;
                 victimStats.deaths++;
 
+                let teamScores = [0, 0];
+                if (roomForDeath && !roomForDeath.isTrueCampaign && Number(roomForDeath.rawRoomType) === 2) {
+                    if (!Array.isArray(roomForDeath.teamScores)) roomForDeath.teamScores = [0, 0];
+                    const attacker = roomForDeath.members.get(attackerIndex);
+                    const victim = roomForDeath.members.get(victimIndex);
+                    if (deathType >= 1 && deathType <= 4 && attacker && victim && attackerIndex !== victimIndex &&
+                        Number(attacker.team) !== Number(victim.team) && [0, 1].includes(Number(attacker.team))) {
+                        roomForDeath.teamScores[Number(attacker.team)]++;
+                    }
+                    teamScores = roomForDeath.teamScores;
+                }
+
                 const buildDeathMsg = (target) => {
 
                     const [deathMsg, deathBody] = target.getMessageBuffer(0x00230124, 0x51);
                     deathBody.writeUint16LE(0, 0x00);
                     deathBody.writeUint32LE(0, 0x02);
-                    deathBody.writeUint32LE(0, 0x06);
+                    deathBody.writeUint16LE(teamScores[0] & 0xFFFF, 0x06);
+                    deathBody.writeUint16LE(teamScores[1] & 0xFFFF, 0x08);
                     deathBody.writeUint16LE(attackerIndex, 0x0A);
                     deathBody.writeUint16LE(victimIndex, 0x0C);
                     deathBody[0x0E] = deathType;
@@ -318,7 +351,7 @@ class ZLobbyDispatch
                     console.log(
                         `[ZLobbyDispatch] >> Broadcast Death_SN 0x00230124 to room #${roomForDeath.id} ` +
                         `(${roomForDeath.members.size} member(s)) (attacker=${attackerIndex}, victim=${victimIndex}, ` +
-                        `type=${deathType}, killer K/D=${killerStats.kills}/${killerStats.deaths})`
+                        `type=${deathType}, team score=${teamScores[0]}-${teamScores[1]}, killer K/D=${killerStats.kills}/${killerStats.deaths})`
                     );
                 } else {
                     client.send(buildDeathMsg(client));

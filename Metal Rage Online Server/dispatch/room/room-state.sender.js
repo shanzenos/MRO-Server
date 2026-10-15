@@ -19,7 +19,13 @@ function resolveRoomDefaultMapEntry(client, fallback) {
 const PVE_MAXUSER_WIRE_VALUE = 16;
 
 function resolveRoomOptionBitsFromRoomSource(roomOptions) {
-    return null;
+    if (!roomOptions) return null;
+    return {
+        password: roomOptions.password ? 1 : 0,
+        balance: roomOptions.balance ? 1 : 0,
+        intrude: roomOptions.intrude ? 1 : 0,
+        training: roomOptions.training ? 1 : 0,
+    };
 
 }
 
@@ -63,6 +69,7 @@ function sendRoomStatePackets(client, ctx, getExactMessageBuffer) {
         roomType,
         mapId,
         maxPlayers,
+        maxPlayersWire = maxPlayers,
         currentUsers,
         gameMode,
         mapIndex,
@@ -90,7 +97,7 @@ function sendRoomStatePackets(client, ctx, getExactMessageBuffer) {
         respBody.writeUint16LE(roomLinkIndex, 0x02);
         respBody.writeUint8(roomType, 0x04);
         respBody.writeUint16LE(mapIndex & 0xFFFF, 0x05);
-        respBody.writeUint8(maxPlayers, 0x07);
+        respBody.writeUint8(maxPlayersWire, 0x07);
         respBody.writeUint8(gameMode, 0x08);
         respBody.writeUint8(3, 0x09);
         respBody.writeUint8(0, 0x0A);
@@ -128,7 +135,7 @@ function sendRoomStatePackets(client, ctx, getExactMessageBuffer) {
         respBody.writeUint8(roomDefaultEntryCount, 0x2F);
 
         client.send(msg);
-        console.log(`[ZRoomDispatch] >> Sent SN_ROOM_DEFAULT (${bodySize} bytes, account=${accountIndex}, room=${roomIndex}, link=${roomLinkIndex}, type=${roomType}, mapIndex=${mapIndex}, map=${mapId}, opt2=0x${((ctxOptionMask || 0) >>> 0).toString(16)}, redTeam=${redTeamIndex}, blueTeam=${blueTeamIndex}, max=${maxPlayers}, mode=${gameMode}, goal=${roomSettingGoal}, time=${roomSettingTime}, round=${roomSettingRound}, entryCount=${roomDefaultEntryCount}, bodyCache=${primaryBodyCacheIndex})`);
+        console.log(`[ZRoomDispatch] >> Sent SN_ROOM_DEFAULT (${bodySize} bytes, account=${accountIndex}, room=${roomIndex}, link=${roomLinkIndex}, type=${roomType}, mapIndex=${mapIndex}, map=${mapId}, opt2=0x${((ctxOptionMask || 0) >>> 0).toString(16)}, redTeam=${redTeamIndex}, blueTeam=${blueTeamIndex}, max=${maxPlayers}, size=${maxPlayersWire}, mode=${gameMode}, goal=${roomSettingGoal}, time=${roomSettingTime}, round=${roomSettingRound}, entryCount=${roomDefaultEntryCount}, bodyCache=${primaryBodyCacheIndex})`);
     }
 
     sendRoomNameOnly(client, roomName, getExactMessageBuffer);
@@ -144,19 +151,8 @@ function sendRoomStatePackets(client, ctx, getExactMessageBuffer) {
 
     {
         const [msg, respBody] = getExactMessageBuffer(SN_ROOM_OPTION, 0x04);
-        const optionMask = (ctxOptionMask || 0) >>> 0;
-        // Static analysis:
-        // body+0x10 -> bit 0x01
-        // body+0x11 -> bit 0x02
-        // body+0x12 -> bit 0x04
-        // body+0x13 -> bit 0x20
-
-        const optionSnBits = roomSourceOptionBits || {
-            password: optionMask & 0x01 ? 1 : 0,
-            balance: optionMask & 0x02 ? 1 : 0,
-            intrude: optionMask & 0x04 ? 1 : 0,
-            training: optionMask & 0x20 ? 1 : 0,
-        };
+        const optionSnBits = roomSourceOptionBits ||
+            { password: 0, balance: 0, intrude: 0, training: 0 };
         respBody.writeUint8(optionSnBits.password, 0x00);
         respBody.writeUint8(optionSnBits.balance, 0x01);
         respBody.writeUint8(optionSnBits.intrude, 0x02);
@@ -164,7 +160,7 @@ function sendRoomStatePackets(client, ctx, getExactMessageBuffer) {
         client.send(msg);
         console.log(
             `[ZRoomDispatch] >> Sent SN_ROOM_OPTION 0x220217 ` +
-            `(flags=${respBody.readUint8(0x00)},${respBody.readUint8(0x01)},${respBody.readUint8(0x02)},${respBody.readUint8(0x03)} mask=0x${optionMask.toString(16)})`
+            `(flags=${respBody.readUint8(0x00)},${respBody.readUint8(0x01)},${respBody.readUint8(0x02)},${respBody.readUint8(0x03)} mask=0x${((ctxOptionMask || 0) >>> 0).toString(16)})`
         );
     }
 
