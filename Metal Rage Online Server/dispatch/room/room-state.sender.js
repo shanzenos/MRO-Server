@@ -1,4 +1,4 @@
-﻿const SN_ROOM_DEFAULT = 0x00220203;
+const SN_ROOM_DEFAULT = 0x00220203;
 const SN_ROOM_BOUNDARY = 0x00220213;
 const SN_ROOM_STATE = 0x00220214;
 const SN_ROOM_OPTION = 0x00220217;
@@ -44,8 +44,8 @@ function sendRoomOptionOnly(client, roomOptions, getExactMessageBuffer) {
     );
 }
 
-function resolveBoundaryMaxUser(maxPlayers, isTrueCampaign) {
-    if (isTrueCampaign) {
+function resolveBoundaryMaxUser(maxPlayers, isCampaignRoom) {
+    if (isCampaignRoom) {
         return PVE_MAXUSER_WIRE_VALUE;
     }
     return maxPlayers;
@@ -81,10 +81,9 @@ function sendRoomStatePackets(client, ctx, getExactMessageBuffer) {
         roomSettingRound,
         roomDefaultEntryCount,
         roomDefaultEntryHints,
-        isCampaignRoom,
         optionMask: ctxOptionMask,
         roomOptions,
-        isTrueCampaign,
+        isCampaignRoom,
     } = ctx;
 
     const roomSourceOptionBits = resolveRoomOptionBitsFromRoomSource(roomOptions);
@@ -142,7 +141,7 @@ function sendRoomStatePackets(client, ctx, getExactMessageBuffer) {
 
     {
         const [msg, respBody] = getExactMessageBuffer(SN_ROOM_BOUNDARY, 0x02);
-        const boundaryMaxUser = resolveBoundaryMaxUser(maxPlayers, isTrueCampaign);
+        const boundaryMaxUser = resolveBoundaryMaxUser(maxPlayers, isCampaignRoom);
         respBody.writeUint8(currentUsers, 0x00);
         respBody.writeUint8(boundaryMaxUser, 0x01);
         client.send(msg);

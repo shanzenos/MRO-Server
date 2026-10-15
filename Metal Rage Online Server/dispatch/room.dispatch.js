@@ -1,4 +1,4 @@
-﻿const NetworkClient = require("../client");
+const NetworkClient = require("../client");
 const db = require('../database/db');
 const { getShareType, getUseTimeSeconds } = require('../database/item-share-type');
 const ZCommunityDispatch = require('./community.dispatch');
@@ -1224,9 +1224,9 @@ class ZRoomDispatch
         const currentUsers = 1;
         const gameMode = client.gameMode_ || 0;
 
-        const isTrueCampaign = !!client.isTrueCampaign_;
-        const isPvpRoom = !isTrueCampaign && Number(client.rawRoomType_) === 2;
-        const mapIndex = isTrueCampaign ? MAP_ID_DEFAULT_PVE : MAP_ID_DEFAULT_PVP;
+        const isCampaignRoom = !!client.campaignRoom_;
+        const isPvpRoom = rooms.isPvpRoom(client);
+        const mapIndex = isCampaignRoom ? MAP_ID_DEFAULT_PVE : MAP_ID_DEFAULT_PVP;
         const roomName = (client.roomName_ || client.nickname_ || 'Room').slice(0, 25);
         const nickname = (client.nickname_ || 'Player').slice(0, 25);
         const pilotId = client.pilot_ || 101;
@@ -1254,18 +1254,18 @@ class ZRoomDispatch
             : (CAMPAIGN_MAP_CACHE_INDEX_BY_MAP_ID[mapId] || ROOM_DEFAULT_ENTRY_HINTS[0] || 8);
 
         const selectedCampaignMapId = Number(client.campaignMapCacheKey_);
-        const selectedMapIds = isTrueCampaign ? MAP_IDS_PVE : MAP_IDS_PVP;
+        const selectedMapIds = isCampaignRoom ? MAP_IDS_PVE : MAP_IDS_PVP;
         const hasSelectedMapId = selectedMapIds.includes(selectedCampaignMapId);
         const campaignMapCacheKey = hasSelectedMapId
             ? selectedCampaignMapId
             : (isPvpRoom ? MAP_ID_DEFAULT_PVP : primaryMapCacheIndex);
-        const selectedRoomMapIndex = isTrueCampaign || isPvpRoom
+        const selectedRoomMapIndex = isCampaignRoom || isPvpRoom
             ? campaignMapCacheKey
             : null;
-        const roomSettingGoal = isTrueCampaign ? 0 : currentUsers;
-        const roomSettingTime = isTrueCampaign ? 0 : (client.mapChangeOneTime_ ?? client.createPlayTime_ ?? maxPlayers);
-        const roomSettingRound = isTrueCampaign ? 1 : (client.mapChangeOneRound_ ?? client.playRound_ ?? 0);
-        const roomDefaultEntryCount = isTrueCampaign
+        const roomSettingGoal = isCampaignRoom ? 0 : currentUsers;
+        const roomSettingTime = isCampaignRoom ? 0 : (client.mapChangeOneTime_ ?? client.createPlayTime_ ?? maxPlayers);
+        const roomSettingRound = isCampaignRoom ? 1 : (client.mapChangeOneRound_ ?? client.playRound_ ?? 0);
+        const roomDefaultEntryCount = isCampaignRoom
             ? ROOM_DEFAULT_ENTRY_HINTS.length
             : (isPvpRoom ? MAP_IDS_PVP.length : Math.min(Math.max(maxPlayers, 1), ROOM_DEFAULT_ENTRY_HINTS.length));
         const ctx = {
@@ -1297,11 +1297,10 @@ class ZRoomDispatch
             roomDefaultEntryHints: isPvpRoom ? MAP_IDS_PVP : ROOM_DEFAULT_ENTRY_HINTS,
             campaignMapHints: CAMPAIGN_MAP_ALL_HINTS,
             pvpMapHints: MAP_IDS_PVP,
-            isCampaignRoom: isTrueCampaign,
             isPvpRoom,
             optionMask: (client.createWord2_ || 0) >>> 0,
             roomOptions: undefined,
-            isTrueCampaign,
+            isCampaignRoom,
             mapChangeOneTime: client.mapChangeOneTime_,
             mapChangeOneRound: client.mapChangeOneRound_,
             playRound: client.playRound_,
@@ -1313,7 +1312,7 @@ class ZRoomDispatch
         sendRoomMapPackets(client, ctx, getExactMessageBuffer);
         sendRoomUserPackets(client, ctx, getExactMessageBuffer);
 
-        if (isTrueCampaign) {
+        if (isCampaignRoom) {
             this.sendCampaignBootstrap(client);
         }
 

@@ -24,6 +24,11 @@ installFakeModule(DB_PATH, makeFixtureDb());
 installFakeModule(require.resolve('../config/whitelist'), { isAllowed: () => true, getHostAddress: () => '127.0.0.1' });
 
 const rooms = require('../rooms.js');
+assert.strictEqual(rooms.isPvpRoom({ campaign: false, rawRoomType: 2 }), true);
+assert.strictEqual(rooms.isPvpRoom({ campaign: true, rawRoomType: 2 }), false);
+assert.strictEqual(rooms.isPvpRoom({ campaign: false, rawRoomType: 1 }), false);
+assert.strictEqual(rooms.isPvpRoom({ campaignRoom_: false, rawRoomType_: 2 }), true);
+
 function resetRooms() {
     for (const room of rooms.listRooms()) {
         for (const account of room.members.keys()) rooms.removeMember(account);
