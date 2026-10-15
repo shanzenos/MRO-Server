@@ -2,6 +2,7 @@ const mysql = require('mysql2/promise');
 const fs = require('fs');
 const path = require('path');
 const { getShareType } = require('./item-share-type');
+const serverConfig = require('../config/server');
 
 // Load DB config from config.json (editable per-machine)
 let dbConfig = { host: '127.0.0.1', port: 3306, user: 'root', password: '', database: 'mro' };
@@ -244,13 +245,16 @@ async function saveEquippedLoadout(accountId, mechType, serials)
 
 async function createAccount(username, nickname, pilot)
 {
+    const settings = serverConfig.getAccountSettings();
+    const startingCredits = settings.grantAllItemsAndMaxCredits ? 2147483647 : settings.startingCredits;
+    if (settings.grantAllItemsAndMaxCredits) await ensureShopCatalog();
     const conn = await pool.getConnection();
     try {
         await conn.beginTransaction();
 
         const [result] = await conn.execute(
-            'INSERT INTO accounts (username, nickname, pilot) VALUES (?, ?, ?)',
-            [username, nickname, pilot]
+            'INSERT INTO accounts (username, nickname, pilot, point) VALUES (?, ?, ?, ?)',
+            [username, nickname, pilot, startingCredits]
         );
         const accountId = result.insertId;
 
@@ -295,9 +299,7 @@ async function createAccount(username, nickname, pilot)
         // extracted from Cache.Bin. ID format: XXYYZZ01
         //   2XXXXXXX = Main Weapons, 3XXXXXXX = Assist Weapons,
         //   4XXXXXXX = Boosters/Support
-        //
         // Part slots: 0=Body, 1=Primary, 2=Sub-left, 3=Sub-right, 4=Booster, 5=Equipment
-        //
         // Mech types: 1=Light(SA), 2=Assault(AA), 3=Medium(HA), 4=Sniper(NB),
         //   5=Firepower(TB), 6=Engineer(BB), 7=Maintenance(EA), 8=Observation(OA)
 
@@ -357,6 +359,24 @@ async function createAccount(username, nickname, pilot)
                         [accountId, result.insertId, mechType, partSlot]
                     );
                 }
+            }
+        }
+
+        if (settings.grantAllItemsAndMaxCredits) {
+            const starterItemIds = new Set(starterLoadouts.map(([, , itemId]) => itemId));
+            const [catalogItems] = await conn.query('SELECT item_id FROM catalog ORDER BY item_id');
+            const itemRows = catalogItems
+                .map(item => Number(item.item_id))
+                .filter(itemId => itemId > 0 && !starterItemIds.has(itemId));
+            for (let offset = 0; offset < itemRows.length; offset += 250) {
+                const chunk = itemRows.slice(offset, offset + 250);
+                const values = chunk.map(() => '(?, ?, 0, 0, 0, 1, 0)').join(', ');
+                const params = [];
+                for (const itemId of chunk) params.push(accountId, itemId);
+                await conn.execute(
+                    `INSERT INTO items (account_id, item_id, slot, mech_type, part_slot, quantity, equipped) VALUES ${values}`,
+                    params
+                );
             }
         }
 
