@@ -23,12 +23,16 @@ function installFakeModule(resolvedPath, exportsObj)
 
 installFakeModule(DB_PATH, makeFixtureDb());
 
-function installFakeWhitelist(hostAddressesByUsername)
+function installFakeWhitelist(hostAddressesByUsername, enabled = true)
 {
     installFakeModule(WHITELIST_PATH, {
-        isAllowed() { return true; },
-        status() { return 'off'; },
+        isAllowed(username, remoteAddress) {
+            if (!enabled) return true;
+            return String(hostAddressesByUsername[String(username || '').toLowerCase()] || '') === remoteAddress;
+        },
+        status() { return enabled ? 'on' : 'off'; },
         getHostAddress(username) {
+            if (!enabled) return arguments[1] || null;
             const key = String(username || '').toLowerCase();
             return Object.prototype.hasOwnProperty.call(hostAddressesByUsername, key)
                 ? hostAddressesByUsername[key]
@@ -203,6 +207,31 @@ async function testMissingHostAddressSendsNothingToNonHost()
     }
 }
 
+async function testWhitelistDisabledUsesHostConnectionAddress()
+{
+    installFakeWhitelist({}, false);
+    const { gate, community, clientA, clientB } = setUpRoom();
+    clientA.socket_.remoteAddress = '198.51.100.23';
+
+    const fakeTimers = installFakeTimers();
+    try {
+        await startBattleUpToReadyHostSq({ gate, clientA, clientB, fakeTimers });
+        assert.strictEqual(clientA._sent.filter((s) => s.op === READY_HOST_SQ).length, 1,
+            'the host must start with whitelist disabled and no allowlist entry');
+
+        const caHandled = community.dispatch(clientA, READY_HOST_CA, makeReadyHostCaBody(12345, 0));
+        assert.strictEqual(caHandled, true);
+        const bReadyHostSn = clientB._sent.find((s) => s.op === READY_HOST_SN);
+        assert.ok(bReadyHostSn, 'the non-host must receive Ready_Host_SN');
+        const hostAddress = Buffer.from(bReadyHostSn.hex, 'hex').subarray(0x03).toString('ascii').split('\0')[0];
+        assert.strictEqual(hostAddress, '198.51.100.23', 'the observed host connection IP must be advertised');
+        console.log('[room-ready-host-split test] PASS: whitelist off uses the host connection IP without an allowlist entry');
+    } finally {
+        fakeTimers.restore();
+        resetRooms();
+    }
+}
+
 async function testMalformedCaSendsNothingToAnyone()
 {
     installFakeWhitelist({ alice: '203.0.113.5' });
@@ -297,6 +326,7 @@ async function main()
 {
     await testSqOnlyToHostAndSnToNonHost();
     await testMissingHostAddressSendsNothingToNonHost();
+    await testWhitelistDisabledUsesHostConnectionAddress();
     await testMalformedCaSendsNothingToAnyone();
     await testListenFailureResultSendsNothingToAnyone();
     await testReadyHostSnUsesRealMapId(9010, 'Map_PC04');

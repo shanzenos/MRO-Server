@@ -76,7 +76,7 @@ class ZGameLoginDispatch
             const accountId = authTokens.lookup(body.readUInt32LE(0), body.readUInt32LE(4));
             if (accountId === null) { client.disconnect(); return; }
             const account = await db.getAccountById(accountId);
-            if (!account || !whitelist.isAllowed(account.username)) { client.disconnect(); return; }
+            if (!account || !whitelist.isAllowed(account.username, client.socket_ && client.socket_.remoteAddress)) { client.disconnect(); return; }
             let tutorials = [];
             const [loginMsg, loginBody] = client.getMessageBuffer(SA_GAME_LOGIN, 0x6);
             loginBody.writeUInt16LE(0, 0);

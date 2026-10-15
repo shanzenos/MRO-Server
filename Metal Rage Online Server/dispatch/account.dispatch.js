@@ -2,6 +2,7 @@ const NetworkClient = require("../client");
 const { MAX_MAP_COUNT, MAX_MECH_COUNT, MAX_SLOT_COUNT } = require('../datatypes/enums');
 const db = require('../database/db');
 const serverConfig = require('../config/server');
+const whitelist = require('../config/whitelist');
 
 const { writeRecordInfoBody } = require('./record-info.builder');
 
@@ -172,6 +173,11 @@ class ZAccountDispatch
 
             const username = body.subarray(0, 0x19).toString('ascii').split('\0').shift();
             console.log(`[ZDispatchAccount::CQ_LOGIN_WASABII] Processing login for "${username}"`);
+
+            if (!whitelist.isAllowed(username, client.socket_ && client.socket_.remoteAddress)) {
+                client.disconnect();
+                return;
+            }
 
             //Store username on client
             client.username_ = username;
