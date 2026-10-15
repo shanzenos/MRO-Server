@@ -9,7 +9,7 @@ This server emulator aims to restore online functionality for the 2009 online me
 
 A server setup tutorial as well as some documentation can be found in the project's wiki: [MRO Server Wiki](https://github.com/shanzenos/MRO-Server/wiki)
 
-It is very WIP, currently only supporting basic functionality. 
+The server currently supports core functionality, the garage/shop, PVE gameplay & Deathmatch mode for PVP.
 
 Server uses the following ports:
 * 9211 - Auth/Dispatch
