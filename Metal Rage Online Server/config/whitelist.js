@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const serverConfig = require('./server');
 
 const CONFIG_PATH = path.join(__dirname, 'allowed-users.json');
 
@@ -64,8 +65,7 @@ function load()
     } catch (err) {
         if (err.code === 'ENOENT') {
             console.warn(
-                '[whitelist] !!!!! config/allowed-users.json not found -- '
-                + 'login is OPEN, any username auto-creates an account !!!!!'
+                '[whitelist] config/allowed-users.json not found; no allowlist entries or host addresses loaded'
             );
         } else {
             throw err;
@@ -77,16 +77,20 @@ function load()
 
 function isAllowed(username)
 {
+    if (!serverConfig.load().whitelistEnabled)
+        return true;
     const map = load();
     if (map === null)
-        return true;
+        return false;
     return map.has(String(username).toLowerCase());
 }
 
 function status()
 {
+    if (!serverConfig.load().whitelistEnabled)
+        return 'off';
     const map = load();
-    return map === null ? 'off' : `on(${map.size} users)`;
+    return map === null ? 'on(0 users)' : `on(${map.size} users)`;
 }
 
 function getHostAddress(username)
