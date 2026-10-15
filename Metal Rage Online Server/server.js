@@ -69,6 +69,7 @@ class DispatchServer
 async function start()
 {
     require('./config/server').load();
+    require('./config/whitelist').initialize();
     await db.verifyConnection();
     const dispatch = new DispatchServer('DispatchServer', SERVER_PORT, require('./dispatch.js'));
     const game = new DispatchServer('GameServer', GAME_PORT, require('./game.js'));

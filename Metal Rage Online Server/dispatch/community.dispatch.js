@@ -141,7 +141,9 @@ class ZCommunityDispatch
                         console.error(`[ZDispatchWaiting] !! Ready_Host_CA result=0x${(resultCode >>> 0).toString(16)} (host Listen failed) for room #${room.id} -- sending NOTHING to anyone, not even the host's own Ready_Success_SN`);
                         suppressHostSuccess = true;
                     } else {
-                        const hostAddress = client.username_ ? whitelist.getHostAddress(client.username_) : null;
+                        const hostAddress = client.username_
+                            ? whitelist.getHostAddress(client.username_, client.socket_ && client.socket_.remoteAddress)
+                            : null;
                         if (!hostAddress) {
                             console.error(`[ZDispatchWaiting] !! no hostAddress configured for host account=${accountId} (username=${client.username_}), room #${room.id} -- not sending Ready_Host_SN to ${room.members.size - 1} non-host member(s)`);
                         } else {

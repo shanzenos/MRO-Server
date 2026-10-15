@@ -13,13 +13,35 @@ function isDottedIpv4Literal(value)
     return IPV4_LITERAL_RE.test(value);
 }
 
+function normalizeIpv4(value)
+{
+    const address = String(value || '').trim().replace(/^::ffff:/i, '');
+    return isDottedIpv4Literal(address) ? address : null;
+}
+
 let cached = undefined;
+
+function createExampleIfEnabled()
+{
+    if (!serverConfig.load().whitelistEnabled) return;
+    try {
+        fs.copyFileSync(
+            path.join(__dirname, 'allowed-users.example.json'),
+            CONFIG_PATH,
+            fs.constants.COPYFILE_EXCL
+        );
+        console.log('[whitelist] Created config/allowed-users.json from the example file');
+    } catch (err) {
+        if (err.code !== 'EEXIST') throw err;
+    }
+}
 
 function load()
 {
     if (cached !== undefined)
         return cached;
 
+    createExampleIfEnabled();
     try {
         const raw = fs.readFileSync(CONFIG_PATH, 'utf8');
         const parsed = JSON.parse(raw);
@@ -29,6 +51,7 @@ function load()
         for (const entry of users) {
             let name;
             let hostAddress = null;
+            let ipAddress = null;
 
             if (entry && typeof entry === 'object') {
                 name = String(entry.name || '').toLowerCase();
@@ -55,10 +78,14 @@ function load()
                         hostAddress = trimmed;
                     }
                 }
+                const configuredIp = typeof entry.ip === 'string' && entry.ip.trim().length > 0
+                    ? entry.ip.trim()
+                    : hostAddress;
+                ipAddress = normalizeIpv4(configuredIp);
             } else {
                 name = String(entry).toLowerCase();
             }
-            map.set(name, { hostAddress });
+            map.set(name, { hostAddress, ipAddress });
         }
         cached = map;
         console.log(`[whitelist] Loaded ${cached.size} allowed user(s) from config/allowed-users.json`);
@@ -75,14 +102,16 @@ function load()
     return cached;
 }
 
-function isAllowed(username)
+function isAllowed(username, remoteAddress)
 {
     if (!serverConfig.load().whitelistEnabled)
         return true;
     const map = load();
     if (map === null)
         return false;
-    return map.has(String(username).toLowerCase());
+    const entry = map.get(String(username).toLowerCase());
+    const ipAddress = normalizeIpv4(remoteAddress);
+    return !!entry && !!ipAddress && entry.ipAddress === ipAddress;
 }
 
 function status()
@@ -93,13 +122,20 @@ function status()
     return map === null ? 'on(0 users)' : `on(${map.size} users)`;
 }
 
-function getHostAddress(username)
+function getHostAddress(username, remoteAddress)
 {
+    if (!serverConfig.load().whitelistEnabled)
+        return normalizeIpv4(remoteAddress);
     const map = load();
     if (map === null)
         return null;
     const entry = map.get(String(username).toLowerCase());
-    return entry ? entry.hostAddress : null;
+    return entry ? (entry.hostAddress || entry.ipAddress) : null;
 }
 
-module.exports = { isAllowed, status, getHostAddress };
+function initialize()
+{
+    if (serverConfig.load().whitelistEnabled) load();
+}
+
+module.exports = { isAllowed, status, getHostAddress, initialize };
