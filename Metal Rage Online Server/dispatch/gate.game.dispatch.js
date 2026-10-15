@@ -506,7 +506,7 @@ function buildMapChangeOneSaFields(body, client)
             rawHex: null,
 
             b0: incoming.b0,
-            w1: adoptedMapId >= 9001 && adoptedMapId <= 9012
+            w1: (adoptedMapId >= 9001 && adoptedMapId <= 9012) || MAP_IDS_PVP.includes(adoptedMapId)
                 ? adoptedMapId : incoming.w1,
             w2: incoming.w2,
             b5: Number.isInteger(adoptedRound) && adoptedRound >= 0 && adoptedRound <= 0xFF
@@ -519,6 +519,7 @@ function buildMapChangeOneSaFields(body, client)
 }
 
 function buildRoomCtxFromRoom(room, accountId) {
+    const isPvpRoom = !room.isTrueCampaign && Number(room.rawRoomType) === 2;
     return {
         roomIndex: room.id,
         accountIndex: accountId,
@@ -529,22 +530,26 @@ function buildRoomCtxFromRoom(room, accountId) {
         gameMode: room.gameMode,
         mapIndex: room.mapId,
         roomName: room.name,
-        roomSettingGoal: room.campaign ? 0 : room.members.size,
-        roomSettingTime: room.campaign ? 0 : room.maxPlayers,
-        roomSettingRound: room.campaign ? 1 : 0,
-        roomDefaultEntryCount: room.campaign
+        roomSettingGoal: room.isTrueCampaign ? 0 : room.members.size,
+        roomSettingTime: room.isTrueCampaign ? 0 : room.playTime,
+        roomSettingRound: room.isTrueCampaign ? 1 : room.playRound,
+        roomDefaultEntryCount: room.isTrueCampaign
             ? ROOM_DEFAULT_ENTRY_HINTS.length
-            : Math.min(Math.max(room.maxPlayers, 1), ROOM_DEFAULT_ENTRY_HINTS.length),
-        roomDefaultEntryHints: ROOM_DEFAULT_ENTRY_HINTS,
-        primaryBodyCacheIndex: CAMPAIGN_MAP_CACHE_INDEX_BY_MAP_ID[room.createMapId || 1] || ROOM_DEFAULT_ENTRY_HINTS[0] || 8,
+            : (isPvpRoom ? MAP_IDS_PVP.length : Math.min(Math.max(room.maxPlayers, 1), ROOM_DEFAULT_ENTRY_HINTS.length)),
+        roomDefaultEntryHints: isPvpRoom ? MAP_IDS_PVP : ROOM_DEFAULT_ENTRY_HINTS,
+        primaryBodyCacheIndex: isPvpRoom
+            ? MAP_IDS_PVP[0]
+            : (CAMPAIGN_MAP_CACHE_INDEX_BY_MAP_ID[room.createMapId || 1] || ROOM_DEFAULT_ENTRY_HINTS[0] || 8),
         selectedMech: 1,
-        isCampaignRoom: room.campaign,
+        isCampaignRoom: room.isTrueCampaign,
+        isPvpRoom,
         optionMask: room.optionMask || 0,
 
         roomOptions: room.options,
         isTrueCampaign: room.isTrueCampaign,
         campaignMapCacheKey: room.mapId,
         campaignMapHints: computeCampaignMapAllHints(),
+        pvpMapHints: MAP_IDS_PVP,
 
         mapChangeOneTime: room.playTime,
         mapChangeOneRound: room.playRound,
@@ -558,7 +563,7 @@ function sendFullRoomStateToClient(client, room, accountId, tag) {
     const roomStateCtx = buildRoomCtxFromRoom(room, accountId);
     sendRoomStatePackets(client, roomStateCtx, getExactMessageBuffer);
     sendRoomMapPackets(client, roomStateCtx, getExactMessageBuffer, { mapChangeOneResponse: true });
-    if (room.campaign) {
+    if (room.isTrueCampaign) {
         const { sendCampaignBootstrap } = require('./room/room-map.sender');
         sendCampaignBootstrap(client, getExactMessageBuffer);
     }
@@ -612,19 +617,15 @@ function resendRoomMapOnly(client, tag)
         const roomForResend = rooms.getRoomByAccount(accountIdForRoom);
         if (roomForResend && accountIdForRoom !== roomForResend.hostAccountId) {
             const roomCtx = buildRoomCtxFromRoom(roomForResend, accountIdForRoom);
-            if (!roomCtx.isTrueCampaign) {
-                console.log(`[ZGateGameDispatch] >> Skipped map-only resend [${tag}] (not true campaign room)`);
-                return;
-            }
             const { sendRoomMapPackets, sendCampaignBootstrap } = require('./room/room-map.sender');
             sendRoomMapPackets(client, roomCtx, getExactMessageBuffer, { mapChangeOneResponse: true });
-            sendCampaignBootstrap(client, getExactMessageBuffer);
+            if (roomCtx.isTrueCampaign) sendCampaignBootstrap(client, getExactMessageBuffer);
             console.log(`[ZGateGameDispatch] >> Re-sent map packets only from Room #${roomForResend.id} [${tag}] (mapId=${roomCtx.mapId}, cacheKey=${roomCtx.campaignMapCacheKey})`);
             return;
         }
 
-        if (!client.isTrueCampaign_) {
-            console.log(`[ZGateGameDispatch] >> Skipped map-only resend [${tag}] (not true campaign room)`);
+        if (!client.campaignRoom_ && Number(client.rawRoomType_) !== 2) {
+            console.log(`[ZGateGameDispatch] >> Skipped map-only resend [${tag}] (not in a map-selectable room)`);
             return;
         }
 
@@ -638,8 +639,9 @@ function resendRoomMapOnly(client, tag)
             campaignMapCacheKey,
             roomDefaultEntryHints,
             campaignMapHints: campaignMapAllHints,
-
+            pvpMapHints: MAP_IDS_PVP,
             isTrueCampaign: client.isTrueCampaign_,
+            isPvpRoom: !client.isTrueCampaign_ && Number(client.rawRoomType_) === 2,
             mapChangeOneTime: client.mapChangeOneTime_,
             mapChangeOneRound: client.mapChangeOneRound_,
             playRound: client.playRound_,
@@ -647,7 +649,7 @@ function resendRoomMapOnly(client, tag)
             mapChangeOneGoal: client.mapChangeOneGoal_,
         };
         sendRoomMapPackets(client, ctx, getExactMessageBuffer, { mapChangeOneResponse: true });
-        sendCampaignBootstrap(client, getExactMessageBuffer);
+        if (client.isTrueCampaign_) sendCampaignBootstrap(client, getExactMessageBuffer);
         console.log(`[ZGateGameDispatch] >> Re-sent map packets only [${tag}] (mapId=${mapId}, cacheKey=${campaignMapCacheKey})`);
     } catch (err) {
         console.error(`[ZGateGameDispatch] >> Error re-sending map packets [${tag}]:`, err.message);
@@ -745,15 +747,14 @@ class ZGateGameDispatch
                 client.maxPlayers_ = maxPlayers;
                 client.gameMode_ = gameMode;
                 client.mapSeed_ = (createWord2 << 16) | createWord1;
-                client.campaignRoom_ = isCampaignLike;
+                client.campaignRoom_ = isTrueCampaign;
                 client.isTrueCampaign_ = isTrueCampaign;  // 실제 캠페인 여부 (PvP=false) (whether it is an actual campaign room, PvP=false)
                 client.createdMapId_ = mapId;
                 {
                     const pickedMap = body.length >= 4 ? body.readUInt16LE(2) : 0;
-                    const isPvpRoomForMapDefault = false;
-                    client.campaignMapCacheKey_ = isPvpRoomForMapDefault
-                        ? (MAP_IDS_PVP.includes(pickedMap) ? pickedMap : MAP_ID_DEFAULT_PVP)
-                        : ((pickedMap >= 9001 && pickedMap <= 9012) ? pickedMap : MAP_ID_DEFAULT_CAMPAIGN);
+                    client.campaignMapCacheKey_ = isTrueCampaign
+                        ? ((pickedMap >= 9001 && pickedMap <= 9012) ? pickedMap : MAP_ID_DEFAULT_CAMPAIGN)
+                        : (MAP_IDS_PVP.includes(pickedMap) ? pickedMap : MAP_ID_DEFAULT_PVP);
                 }
                 client.readyHostHandshakeSent_ = false;
                 client.gameUserBootstrapSent_ = false;
@@ -771,7 +772,7 @@ class ZGateGameDispatch
                         playTime: client.mapChangeOneTime_ || 0,
                         playRound: client.playRound_,
                         maxPlayers,
-                        campaign: isCampaignLike,
+                        campaign: isTrueCampaign,
                         hostAccountId,
 
                         roomType: effectiveRoomType,
@@ -930,7 +931,9 @@ class ZGateGameDispatch
                         }
                         if (roomForGate.members.size > 1) {
 
-                            const hostAddress = client.username_ ? whitelist.getHostAddress(client.username_) : null;
+                            const hostAddress = client.username_
+                                ? whitelist.getHostAddress(client.username_, client.socket_ && client.socket_.remoteAddress)
+                                : null;
                             if (!hostAddress) {
                                 console.error(`[ZGateGameDispatch] !! Refusing battle start: no hostAddress configured for host account=${accountIdForGate} (username=${client.username_}, nickname=${client.nickname_}), room #${roomForGate.id} has ${roomForGate.members.size} members`);
                                 return true;
@@ -1187,12 +1190,14 @@ class ZGateGameDispatch
                 clearPendingRoomStateRetries(client, 'map-change-one cq');
                 const incomingFields = parseMapChangeOneBody(body);
 
-                const inPveMapRange = incomingFields.w1 >= 9001 && incomingFields.w1 <= 9012;
-                if (inPveMapRange) {
+                const isPveMap = incomingFields.w1 >= 9001 && incomingFields.w1 <= 9012;
+                const isPvpMap = MAP_IDS_PVP.includes(incomingFields.w1);
+                const isKnownMap = isPveMap || isPvpMap;
+                if (isKnownMap) {
                     client.campaignMapCacheKey_ = incomingFields.w1;
                 }
 
-                if (inPveMapRange) {
+                if (isKnownMap) {
                     client.playRound_ = incomingFields.b5;
 
                     client.mapChangeOneTime_ = incomingFields.w2;

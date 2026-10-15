@@ -5,6 +5,7 @@ const ZCommunityDispatch = require('./community.dispatch');
 const { sendRoomStatePackets } = require('./room/room-state.sender');
 const { sendRoomUserPackets } = require('./room/room-user.sender');
 const { sendRoomMapPackets, sendCampaignBootstrap } = require('./room/room-map.sender');
+const { MAP_IDS_PVP } = require('./map-info.sender');
 const { sendGameUserBootstrap } = require('./room/room-game-user.sender');
 const rooms = require('../rooms.js');
 const { sendFullRoomList } = require('./room/room-list.sender');
@@ -121,7 +122,6 @@ const CAMPAIGN_MAP_CACHE_INDEX_BY_MAP_ID = {
 };
 // Campaign map cache indices for SN_MAP_CHANGE_ALL (campaign-only, no PvP PC-maps)
 const MAP_IDS_PVE = [9001, 9002, 9003, 9004, 9005, 9006, 9007, 9008, 9009, 9010, 9011, 9012];
-const MAP_IDS_PVP = [1011, 1021, 1031, 1041, 1051, 1061, 1071, 1081];
 const MAP_ID_DEFAULT_PVE = 9001;
 const MAP_ID_DEFAULT_PVP = 1011;
 
@@ -1222,7 +1222,9 @@ class ZRoomDispatch
         const currentUsers = 1;
         const gameMode = client.gameMode_ || 0;
 
-        const mapIndex = client.campaignRoom_ ? MAP_ID_DEFAULT_PVE : MAP_ID_DEFAULT_PVP;
+        const isTrueCampaign = !!client.isTrueCampaign_;
+        const isPvpRoom = !isTrueCampaign && Number(client.rawRoomType_) === 2;
+        const mapIndex = isTrueCampaign ? MAP_ID_DEFAULT_PVE : MAP_ID_DEFAULT_PVP;
         const roomName = (client.roomName_ || client.nickname_ || 'Room').slice(0, 25);
         const nickname = (client.nickname_ || 'Player').slice(0, 25);
         const pilotId = client.pilot_ || 101;
@@ -1245,22 +1247,25 @@ class ZRoomDispatch
         const userStateRaw = 1;
         const packedIp = 0x0100007F;
         const selectedMech = 1;
-        const primaryMapCacheIndex = CAMPAIGN_MAP_CACHE_INDEX_BY_MAP_ID[mapId] || ROOM_DEFAULT_ENTRY_HINTS[0] || 8;
+        const primaryMapCacheIndex = isPvpRoom
+            ? MAP_ID_DEFAULT_PVP
+            : (CAMPAIGN_MAP_CACHE_INDEX_BY_MAP_ID[mapId] || ROOM_DEFAULT_ENTRY_HINTS[0] || 8);
+
         const selectedCampaignMapId = Number(client.campaignMapCacheKey_);
-        const hasSelectedCampaignMapId = client.campaignRoom_ &&
-            MAP_IDS_PVE.includes(selectedCampaignMapId);
-        const campaignMapCacheKey = hasSelectedCampaignMapId
+        const selectedMapIds = isTrueCampaign ? MAP_IDS_PVE : MAP_IDS_PVP;
+        const hasSelectedMapId = selectedMapIds.includes(selectedCampaignMapId);
+        const campaignMapCacheKey = hasSelectedMapId
             ? selectedCampaignMapId
-            : primaryMapCacheIndex;
-        const selectedRoomMapIndex = hasSelectedCampaignMapId
-            ? selectedCampaignMapId
+            : (isPvpRoom ? MAP_ID_DEFAULT_PVP : primaryMapCacheIndex);
+        const selectedRoomMapIndex = isTrueCampaign || isPvpRoom
+            ? campaignMapCacheKey
             : null;
-        const roomSettingGoal = client.campaignRoom_ ? 0 : currentUsers;
-        const roomSettingTime = client.campaignRoom_ ? 0 : maxPlayers;
-        const roomSettingRound = client.campaignRoom_ ? 1 : 0;
-        const roomDefaultEntryCount = client.campaignRoom_
+        const roomSettingGoal = isTrueCampaign ? 0 : currentUsers;
+        const roomSettingTime = isTrueCampaign ? 0 : (client.mapChangeOneTime_ ?? client.createPlayTime_ ?? maxPlayers);
+        const roomSettingRound = isTrueCampaign ? 1 : (client.mapChangeOneRound_ ?? client.playRound_ ?? 0);
+        const roomDefaultEntryCount = isTrueCampaign
             ? ROOM_DEFAULT_ENTRY_HINTS.length
-            : Math.min(Math.max(maxPlayers, 1), ROOM_DEFAULT_ENTRY_HINTS.length);
+            : (isPvpRoom ? MAP_IDS_PVP.length : Math.min(Math.max(maxPlayers, 1), ROOM_DEFAULT_ENTRY_HINTS.length));
         const ctx = {
             roomIndex,
             accountIndex,
@@ -1286,12 +1291,14 @@ class ZRoomDispatch
             roomSettingTime,
             roomSettingRound,
             roomDefaultEntryCount,
-            roomDefaultEntryHints: ROOM_DEFAULT_ENTRY_HINTS,
+            roomDefaultEntryHints: isPvpRoom ? MAP_IDS_PVP : ROOM_DEFAULT_ENTRY_HINTS,
             campaignMapHints: CAMPAIGN_MAP_ALL_HINTS,
-            isCampaignRoom: client.campaignRoom_,
+            pvpMapHints: MAP_IDS_PVP,
+            isCampaignRoom: isTrueCampaign,
+            isPvpRoom,
             optionMask: (client.createWord2_ || 0) >>> 0,
             roomOptions: undefined,
-            isTrueCampaign: client.isTrueCampaign_,
+            isTrueCampaign,
             mapChangeOneTime: client.mapChangeOneTime_,
             mapChangeOneRound: client.mapChangeOneRound_,
             playRound: client.playRound_,
@@ -1302,7 +1309,8 @@ class ZRoomDispatch
         sendRoomStatePackets(client, ctx, getExactMessageBuffer);
         sendRoomMapPackets(client, ctx, getExactMessageBuffer);
         sendRoomUserPackets(client, ctx, getExactMessageBuffer);
-        if (client.campaignRoom_) {
+
+        if (isTrueCampaign) {
             this.sendCampaignBootstrap(client);
         }
 
