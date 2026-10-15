@@ -23,8 +23,8 @@ function allocateRoomId() {
 }
 
 function createRoom({
-    id, name, mapId, playTime, playRound, maxPlayers, campaign, hostAccountId, roomType, hasPassword, password,
-    rawRoomType, isTrueCampaign, gameMode, optionMask, createMapId,
+    id, name, mapId, playTime, playRound, maxPlayers, maxPlayersWire, campaign, hostAccountId, roomType, hasPassword, password,
+    rawRoomType, isTrueCampaign, gameMode, optionMask, createMapId, mapChangeOneKill, mapChangeOneGoal,
 }) {
     const room = {
         id,
@@ -32,7 +32,10 @@ function createRoom({
         mapId,
         playTime,
         playRound,
+        mapChangeOneKill: mapChangeOneKill == null ? (isTrueCampaign ? 0 : 1) : mapChangeOneKill,
+        mapChangeOneGoal: mapChangeOneGoal == null ? (isTrueCampaign ? 0 : 1) : mapChangeOneGoal,
         maxPlayers,
+        maxPlayersWire: maxPlayersWire == null ? maxPlayers : maxPlayersWire,
         campaign,
         hostAccountId,
 
@@ -77,12 +80,14 @@ function setHost(roomId, accountId) {
     return true;
 }
 
-function updateRoomMapSelection(roomId, { mapId, playTime, playRound }) {
+function updateRoomMapSelection(roomId, { mapId, playTime, playRound, mapChangeOneKill, mapChangeOneGoal }) {
     const room = rooms.get(roomId);
     if (!room) return false;
     if (mapId !== undefined) room.mapId = mapId;
     if (playTime !== undefined) room.playTime = playTime;
     if (playRound !== undefined) room.playRound = playRound;
+    if (mapChangeOneKill !== undefined) room.mapChangeOneKill = mapChangeOneKill;
+    if (mapChangeOneGoal !== undefined) room.mapChangeOneGoal = mapChangeOneGoal;
     return true;
 }
 

@@ -149,6 +149,7 @@ function resetRoomSessionState(client) {
     client.mapId_ = 0;
     client.createdMapId_ = 0;
     client.maxPlayers_ = 0;
+    client.maxPlayersWire_ = 0;
     client.gameMode_ = 0;
     client.campaignRoom_ = false;
     client.battleStartSequenceArmed_ = false;
@@ -1219,6 +1220,7 @@ class ZRoomDispatch
         const roomType = rawRoomType === 0 ? 2 : rawRoomType;
         const mapId = client.mapId_ || 1;
         const maxPlayers = Math.max(client.maxPlayers_ || 1, 1);
+        const maxPlayersWire = client.maxPlayersWire_ ?? maxPlayers;
         const currentUsers = 1;
         const gameMode = client.gameMode_ || 0;
 
@@ -1272,6 +1274,7 @@ class ZRoomDispatch
             roomType,
             mapId,
             maxPlayers,
+            maxPlayersWire,
             currentUsers,
             gameMode,
             mapIndex: selectedRoomMapIndex || mapIndex,
@@ -1324,3 +1327,4 @@ class ZRoomDispatch
 };
 
 module.exports.resetRoomSessionState = resetRoomSessionState;
+module.exports.sendLobbyBootstrapAfterRoomLeave = sendLobbyBootstrapAfterRoomLeave;

@@ -21,6 +21,7 @@ function installFakeModule(resolvedPath, exportsObj)
 }
 
 installFakeModule(DB_PATH, makeFixtureDb());
+installFakeModule(require.resolve('../config/whitelist'), { isAllowed: () => true, getHostAddress: () => '127.0.0.1' });
 
 const rooms = require('../rooms.js');
 function resetRooms() {
@@ -32,6 +33,7 @@ function resetRooms() {
 const GateGameDispatch = require('../dispatch/gate.game.dispatch.js');
 const LobbyDispatch = require('../dispatch/lobby.dispatch.js');
 const { leaveRoomAndNotify } = require('../dispatch/room/room-leave.js');
+const { buildRoomListEntry } = require('../dispatch/room/room-list.sender.js');
 
 const CQ_CREATE = 0x00220201;
 const ENTER_CQ = 0x00220231;
@@ -79,7 +81,7 @@ function makeEnterBody(roomIndex)
     return body;
 }
 
-function main()
+async function main()
 {
     resetRooms();
 
@@ -541,9 +543,17 @@ function main()
         const readyHandledOn = gate.dispatch(joinerL, 0x00222101, Buffer.from('270a000001', 'hex'));
         assert.strictEqual(readyHandledOn, true, 'Ready 0x00222101 must be handled');
 
+        hostK._sent.length = 0;
+        joinerL._sent.length = 0;
+        assert.strictEqual(gate.dispatch(joinerL, 0x00222101, Buffer.from('270a000000', 'hex')), true, 'un-ready 0x00222101 must be handled');
+        assert.strictEqual(rooms.getRoomByAccount(72).members.get(72).ready, false, 'player must be able to un-ready');
+        assert.deepStrictEqual(decodeUserState(hostK._sent.find((s) => s.op === USER_STATE_SN).hex), { userIndex: 72, raw: 1 }, 'un-ready must broadcast waiting state');
+        gate.dispatch(joinerL, 0x00222101, Buffer.from('270a000001', 'hex'));
+
         const hostReadyHits = hostK._sent.filter((s) => s.op === USER_STATE_SN).map((s) => decodeUserState(s.hex));
-        assert.strictEqual(hostReadyHits.length, 1, 'the host must receive exactly one User_State_SN broadcast');
-        assert.deepStrictEqual(hostReadyHits[0], { userIndex: 72, raw: 2 }, "the host's User_State_SN must name the joiner (72) READY (raw 2)");
+        assert.strictEqual(hostReadyHits.length, 2, 'the host must receive the explicit un-ready and ready state updates');
+        assert.deepStrictEqual(hostReadyHits[0], { userIndex: 72, raw: 1 }, "the host's first update must mark the joiner WAITING (raw 1)");
+        assert.deepStrictEqual(hostReadyHits[1], { userIndex: 72, raw: 2 }, "the host's second update must mark the joiner READY (raw 2)");
 
         const joinerReadyHits = joinerL._sent.filter((s) => s.op === USER_STATE_SN).map((s) => decodeUserState(s.hex));
         const joinerOwnReadyBroadcast = joinerReadyHits.filter((h) => h.userIndex === 72 && h.raw === 2);
@@ -571,8 +581,264 @@ function main()
         resetRooms();
     }
 
+    const pvpHost = makeFakeClient(81, 30907);
+    const pvpJoiner = makeFakeClient(82, 30907);
+    const lobbyWatcher = makeFakeClient(83, 30907);
+    pvpHost.accountId_ = 81;
+    pvpJoiner.accountId_ = 82;
+    lobbyWatcher.accountId_ = 83;
+    pvpHost.username_ = 'PvpHost';
+    pvpHost.mapChangeOneTime_ = 5;
+    pvpHost.mapChangeOneRound_ = 1;
+    pvpHost.mapChangeOneKill_ = 50;
+    pvpHost.mapChangeOneGoal_ = 0;
+    pvpHost.nickname_ = 'PvpHost';
+    pvpJoiner.nickname_ = 'PvpJoiner';
+    rooms.registerLobbyClientSource([pvpHost, pvpJoiner, lobbyWatcher]);
+    const pvpCreateBody = makeCreateBody('Pvp Room');
+    pvpCreateBody[0] = 2;
+    pvpCreateBody[6] = 2;
+    pvpCreateBody.writeUInt16LE(3, 4);
+    pvpCreateBody.writeUInt16LE(3, 12);
+    assert.strictEqual(gate.dispatch(pvpHost, CQ_CREATE, pvpCreateBody), true, 'PvP room creation must be handled');
+    const pvpRoom = rooms.getRoom(pvpHost.createdRoomIndex_);
+    assert.strictEqual(pvpRoom.maxPlayers, 8, 'PvP 4v4 setting must allow eight total players');
+    assert.strictEqual(pvpRoom.maxPlayersWire, 3, 'PvP wire size must preserve the client 4v4 selection');
+    assert.strictEqual(pvpRoom.playTime, 5, 'PvP room must retain the host-selected time setting');
+    assert.strictEqual(pvpRoom.playRound, 1, 'PvP room must not interpret the selected map ID as its round count');
+
+    const pvpSettingsBody = makeMapChangeOneBody({ w1: 1011, w2: 7, b5: 3, w6: 20, w8: 5 });
+    assert.strictEqual(gate.dispatch(pvpHost, 0x00220221, pvpSettingsBody), true, 'PvP map/settings change must be handled');
+    assert.strictEqual(pvpRoom.playTime, 7, 'host time setting must be stored on the shared room');
+    assert.strictEqual(pvpRoom.playRound, 3, 'host round setting must be stored on the shared room');
+    assert.strictEqual(pvpRoom.mapChangeOneKill, 20, 'host kill setting must be stored on the shared room');
+    assert.strictEqual(pvpRoom.mapChangeOneGoal, 5, 'host goal setting must be stored on the shared room');
+
+    const optionChangeBody = Buffer.from([0, 1, 1]);
+    assert.strictEqual(gate.dispatch(pvpHost, 0x00220215, optionChangeBody), true, 'PvP room option change must be handled');
+    assert.strictEqual(pvpRoom.options.balance, true, 'room must retain the host-selected balance option');
+    assert.strictEqual(pvpRoom.options.intrude, true, 'room must retain the host-selected join option');
+    const hostOptionPacket = pvpHost._sent.findLast((s) => s.op === '0x00220217');
+    assert.ok(hostOptionPacket, 'host must receive the updated room options');
+    assert.deepStrictEqual(Buffer.from(hostOptionPacket.hex, 'hex').subarray(0, 4), Buffer.from([0, 1, 1, 0]));
+
+    const pvpJoinTimers = installFakeTimers();
+    try {
+        assert.strictEqual(gate.dispatch(pvpJoiner, ENTER_CQ, makeEnterBody(pvpRoom.id)), true, 'PvP room entry must be handled');
+        while (pvpJoinTimers.fireNext()) { }
+    } finally {
+        pvpJoinTimers.restore();
+    }
+    const joinerRoomDefault = pvpJoiner._sent.find((s) => s.op === '0x00220203');
+    assert.ok(joinerRoomDefault, 'PvP joiner must receive room settings');
+    const joinerSettings = Buffer.from(joinerRoomDefault.hex, 'hex');
+    assert.strictEqual(joinerSettings.readUInt8(0x07), 3, 'PvP joiner must receive the client wire setting for 4v4');
+    const joinerBoundary = pvpJoiner._sent.find((s) => s.op === '0x00220213');
+    assert.ok(joinerBoundary, 'PvP joiner must receive the room boundary');
+    assert.strictEqual(Buffer.from(joinerBoundary.hex, 'hex').readUInt8(1), 8, 'PvP joiner must receive an eight-player boundary for 4v4');
+    assert.deepStrictEqual(
+        { goal: joinerSettings.readUInt8(0x1C), time: joinerSettings.readUInt8(0x1D), round: joinerSettings.readUInt8(0x1E) },
+        { goal: 5, time: 7, round: 3 },
+        'PvP joiner must receive the host-selected shared goal, time, and round settings'
+    );
+    assert.deepStrictEqual(
+        Buffer.from(pvpJoiner._sent.findLast((s) => s.op === '0x00220217').hex, 'hex').subarray(0, 4),
+        Buffer.from([0, 1, 1, 0]),
+        'PvP joiner must receive shared balance and join options'
+    );
+    pvpHost._sent.length = 0;
+    pvpJoiner._sent.length = 0;
+    assert.strictEqual(gate.dispatch(pvpHost, 0x00220215, Buffer.from([0, 0, 0])), true, 'PvP room options must be switchable off');
+    assert.strictEqual(pvpRoom.options.balance, false);
+    assert.strictEqual(pvpRoom.options.intrude, false);
+    assert.deepStrictEqual(Buffer.from(pvpHost._sent.findLast((s) => s.op === '0x00220217').hex, 'hex').subarray(0, 4), Buffer.from([0, 0, 0, 0]));
+    assert.deepStrictEqual(Buffer.from(pvpJoiner._sent.findLast((s) => s.op === '0x00220217').hex, 'hex').subarray(0, 4), Buffer.from([0, 0, 0, 0]));
+
+    pvpHost._sent.length = 0;
+    pvpJoiner._sent.length = 0;
+    assert.strictEqual(gate.dispatch(pvpHost, 0x00220211, Buffer.from([16])), true, 'PvP room capacity change must be handled');
+    assert.strictEqual(pvpRoom.maxPlayers, 16, '8v8 room setting must update total room capacity');
+    assert.strictEqual(pvpRoom.maxPlayersWire, 7, '8v8 room setting must update the room default size value');
+    assert.ok(pvpHost._sent.find((s) => s.op === '0x00220212'), 'host must receive MaxUser_Change_SA');
+    assert.strictEqual(Buffer.from(pvpHost._sent.findLast((s) => s.op === '0x00220203').hex, 'hex').readUInt8(0x07), 7);
+    assert.strictEqual(Buffer.from(pvpJoiner._sent.findLast((s) => s.op === '0x00220203').hex, 'hex').readUInt8(0x07), 7);
+    assert.strictEqual(Buffer.from(pvpJoiner._sent.findLast((s) => s.op === '0x00220213').hex, 'hex').readUInt8(1), 16);
+
+    const pvpListEntry = buildRoomListEntry(pvpRoom, 1);
+    assert.strictEqual(pvpListEntry.readUInt8(7), 2, 'PvP room list entry must preserve wire room type 2');
+    assert.strictEqual(pvpListEntry.readUInt8(11), 16, 'PvP room list entry must advertise sixteen total seats for 8v8');
+
+    const mapListRequest = Buffer.alloc(56);
+    mapListRequest[0] = 1;
+    mapListRequest[1] = 6;
+    for (let i = 0; i < 6; i++) {
+        const off = 2 + i * 9;
+        mapListRequest.writeUInt16LE(1011 + i * 10, off);
+        mapListRequest.writeUInt16LE(5, off + 2);
+        mapListRequest.writeUInt8(i === 0 ? 1 : 0, off + 4);
+    }
+    pvpHost._sent.length = 0;
+    assert.strictEqual(gate.dispatch(pvpHost, 0x00220224, mapListRequest), true, 'Map_Change_All_CQ must be handled');
+    const mapListAck = pvpHost._sent.find((s) => s.op === '0x00220225');
+    assert.ok(mapListAck, 'Map_Change_All_CQ must receive its matching SA instead of falling through unhandled');
+    assert.deepStrictEqual(Buffer.from(mapListAck.hex, 'hex'), Buffer.alloc(6), 'Map_Change_All_SA must acknowledge success');
+
+    const teamChangeBody = Buffer.alloc(2);
+    teamChangeBody.writeUInt16LE(1, 0);
+    const teamChangeHandled = gate.dispatch(pvpJoiner, 0x00220311, teamChangeBody);
+    assert.strictEqual(teamChangeHandled, true, 'PvP team change must be handled');
+    assert.strictEqual(pvpRoom.members.get(82).team, 1, 'server member state must retain the selected blue team');
+    assert.ok(pvpJoiner._sent.some((s) => s.op === '0x00220312'), 'team changer must receive Team_Change_SA');
+    const hostTeamState = pvpHost._sent.findLast((s) => s.op === USER_DEFAULT_SN && Buffer.from(s.hex, 'hex').readUInt16LE(0x02) === 82);
+    assert.ok(hostTeamState, 'host must receive the updated joiner user state');
+    assert.strictEqual(Buffer.from(hostTeamState.hex, 'hex').readUInt16LE(0x13), 1, 'host must see the joiner on blue team');
+    console.log('[room-join test] PASS: PvP room type and team changes are retained and broadcast to the host');
+
+    const startTimers = installFakeTimers();
+    try {
+        pvpHost._sent.length = 0;
+        pvpJoiner._sent.length = 0;
+        assert.strictEqual(gate.dispatch(pvpHost, 0x00222103, Buffer.alloc(0)), true, 'room game start must be handled');
+        while (startTimers.fireNext()) { await new Promise((resolve) => setImmediate(resolve)); }
+    } finally {
+        startTimers.restore();
+    }
+    const gameInfoPacket = pvpHost._sent.find((s) => s.op === '0x00222111');
+    assert.ok(gameInfoPacket, 'host must receive game-info roster state');
+    assert.strictEqual(Buffer.from(gameInfoPacket.hex, 'hex').readUInt16LE(0x0F), 2, 'game-info roster count must match the two current room members');
+    const gameUserPackets = pvpHost._sent.filter((s) => s.op === '0x00222112');
+    assert.strictEqual(gameUserPackets.length, 2, 'host must receive both in-game user records');
+    const joinerGameUser = gameUserPackets.find((s) => Buffer.from(s.hex, 'hex').readUInt16LE(0x02) === 82);
+    assert.ok(joinerGameUser, 'host must receive the joiner in the in-game user table');
+    assert.strictEqual(Buffer.from(joinerGameUser.hex, 'hex').readUInt16LE(0x04), 1, 'in-game user table must preserve the joiner on blue team');
+    const hostGameUser = pvpJoiner._sent.filter((s) => s.op === '0x00222112').find((s) => Buffer.from(s.hex, 'hex').readUInt16LE(0x02) === 81);
+    assert.ok(hostGameUser, 'joiner must receive the host in the in-game user table');
+    assert.strictEqual(Buffer.from(hostGameUser.hex, 'hex').readUInt16LE(0x04), 0, 'in-game user table must preserve the host on red team');
+    assert.strictEqual(pvpRoom.state, 'playing', 'the shared room must enter the in-progress state on start');
+    assert.strictEqual(buildRoomListEntry(pvpRoom, 1).readUInt8(8), 1, 'room-list state must identify the room as in progress');
+    assert.ok(lobbyWatcher._sent.some((s) => s.op === ROOM_LIST_SN && Buffer.from(s.hex, 'hex').includes(Buffer.from([pvpRoom.id, 0, 2]))), 'lobby watchers must receive the running-room update');
+
+    pvpHost._sent.length = 0;
+    const deathBody = Buffer.alloc(11);
+    deathBody.writeUInt16LE(81, 0);
+    deathBody.writeUInt16LE(82, 2);
+    deathBody[4] = 1;
+    assert.strictEqual(lobby.dispatch(pvpHost, 0x00230123, deathBody), true, 'PvP kill must be handled');
+    let deathPacket = pvpHost._sent.find((s) => s.op === '0x00230124');
+    assert.strictEqual(Buffer.from(deathPacket.hex, 'hex').readUInt16LE(0x06), 1, 'red team kill score must appear in Death_SN');
+    assert.strictEqual(Buffer.from(deathPacket.hex, 'hex').readUInt16LE(0x08), 0, 'blue team score must remain zero after a red kill');
+    deathBody.writeUInt16LE(82, 0);
+    deathBody.writeUInt16LE(81, 2);
+    pvpJoiner._sent.length = 0;
+    assert.strictEqual(lobby.dispatch(pvpHost, 0x00230123, deathBody), true, 'opposing PvP kill must be handled');
+    deathPacket = pvpJoiner._sent.find((s) => s.op === '0x00230124');
+    assert.strictEqual(Buffer.from(deathPacket.hex, 'hex').readUInt16LE(0x06), 1, 'red team score must be retained');
+    assert.strictEqual(Buffer.from(deathPacket.hex, 'hex').readUInt16LE(0x08), 1, 'blue team kill score must increment');
+
+    const deniedJoiner = makeFakeClient(84, 30907);
+    deniedJoiner.accountId_ = 84;
+    assert.strictEqual(gate.dispatch(deniedJoiner, ENTER_CQ, makeEnterBody(pvpRoom.id)), true, 'mid-match entry request must be handled');
+    assert.strictEqual(pvpRoom.members.has(84), false, 'join-in-progress must be rejected while the room option is off');
+    assert.strictEqual(Buffer.from(deniedJoiner._sent.find((s) => s.op === '0x00220232').hex, 'hex').readUInt16LE(0), 1, 'rejected entry must receive a failure response');
+
+    pvpRoom.state = 'lobby';
+    pvpRoom.battleStartGen = 0;
+    pvpRoom.beginRoundAcceptedAt = 0;
+    assert.strictEqual(lobby.dispatch(pvpHost, 0x00230151, Buffer.alloc(0)), true, 'BeginRound must be handled');
+    assert.strictEqual(pvpRoom.state, 'playing', 'BeginRound must mark the room in progress');
+    assert.ok(lobbyWatcher._sent.some((s) => s.op === ROOM_LIST_SN && Buffer.from(s.hex, 'hex').includes(Buffer.from([pvpRoom.id, 0, 2]))), 'BeginRound must refresh lobby room state');
+
+    const generationBeforeDuplicateStart = pvpRoom.battleStartGen;
+    const duplicateStartTimers = installFakeTimers();
+    try {
+        assert.strictEqual(gate.dispatch(pvpHost, 0x00222103, Buffer.alloc(0)), true);
+        assert.strictEqual(pvpRoom.battleStartGen, generationBeforeDuplicateStart, 'duplicate starts must not create a new battle generation');
+        assert.strictEqual(duplicateStartTimers.hasPending(), false, 'duplicate start must not schedule another match start');
+    } finally {
+        duplicateStartTimers.restore();
+    }
+
+    pvpHost._sent.length = 0;
+    assert.strictEqual(gate.dispatch(pvpHost, 0x00220215, Buffer.from([0, 0, 1])), true, 'host must be able to enable in-progress joins');
+    assert.ok(!pvpHost._sent.some((s) => s.op === USER_MASTER_SN), 'room settings changes must not resend the host appointment popup');
+    const lateJoiner = makeFakeClient(85, 30907);
+    lateJoiner.accountId_ = 85;
+    lateJoiner.nickname_ = 'LateJoiner';
+    lateJoiner.pilot_ = 103;
+    const lateJoinTimers = installFakeTimers();
+    try {
+        assert.strictEqual(gate.dispatch(lateJoiner, ENTER_CQ, makeEnterBody(pvpRoom.id)), true, 'mid-match entry must be handled');
+        while (lateJoinTimers.fireNext()) await new Promise((resolve) => setImmediate(resolve));
+    } finally {
+        lateJoinTimers.restore();
+    }
+    assert.strictEqual(pvpRoom.state, 'playing', 'joining must not return the existing room to its lobby');
+    assert.strictEqual(pvpRoom.members.get(85).team, 0, 'late joiner must be assigned to the smaller PvP team');
+    assert.ok(lateJoiner._sent.some((s) => s.op === '0x00420111'), 'late joiner must receive the transition into the active match');
+    assert.ok(lateJoiner._sent.some((s) => s.op === '0x00222112'), 'late joiner must receive the in-game player roster');
+    assert.ok(lateJoiner._sent.some((s) => s.op === '0x00222111'), 'late joiner must receive the active match settings');
+    assert.ok(lateJoiner._sent.some((s) => s.op === '0x00222104'), 'late joiner must receive the game-start acknowledgement');
+
+    const lateLeaveTimers = installFakeTimers();
+    try {
+        assert.strictEqual(gate.dispatch(lateJoiner, 0x00220234, Buffer.alloc(0)), true, 'late joiner must be able to leave the room');
+        while (lateLeaveTimers.fireNext()) { }
+    } finally {
+        lateLeaveTimers.restore();
+    }
+    console.log('[room-join test] PASS: game-start user table retains each PvP member\'s selected team');
+
+    const leaveTimers = installFakeTimers();
+    try {
+        pvpRoom.state = 'playing';
+        pvpRoom.members.get(82).team = 1;
+        pvpRoom.members.get(81).team = 0;
+        pvpHost._sent.length = 0;
+        assert.strictEqual(gate.dispatch(pvpJoiner, 0x00222131, Buffer.alloc(0)), true, 'in-battle leave must be handled');
+        assert.strictEqual(pvpRoom.state, 'lobby', 'a PvP match must end when one side leaves the match');
+        const endGame = pvpHost._sent.find((s) => s.op === '0x00222213');
+        assert.ok(endGame, 'remaining PvP player must receive EndGame_SN when the opposing side leaves');
+        assert.strictEqual(Buffer.from(endGame.hex, 'hex').readUInt16LE(0), 0, 'remaining red player must be declared the winner');
+
+        const leaveHandled = gate.dispatch(pvpJoiner, 0x00220234, Buffer.alloc(0));
+        assert.strictEqual(leaveHandled, true, 'room leave must be handled');
+        assert.strictEqual(rooms.getRoomByAccount(82), undefined, 'leaving member must be removed from room state');
+        assert.strictEqual(pvpRoom.members.size, 1, 'remaining host must no longer see the leaver in room state');
+        assert.strictEqual(pvpRoom.members.get(81).ready, false, 'remaining player must return to waiting after match end');
+        assert.strictEqual(pvpJoiner.roomType_, 0, 'leaving client room session must reset');
+        while (leaveTimers.fireNext()) { }
+        assert.ok(pvpJoiner._sent.some((s) => s.op === '0x00230112'), 'leaving client must receive lobby-enter state');
+        assert.ok(pvpJoiner._sent.some((s) => s.op === '0x00230103'), 'leaving client must receive lobby room-list state');
+        console.log('[room-join test] PASS: leaving a room resets membership and restores lobby state');
+    } finally {
+        leaveTimers.restore();
+    }
+    resetRooms();
+
+    for (const [requestedMaxPlayers, teamSize] of [[8, 4], [16, 8], [24, 12], [32, 16]]) {
+        const sizeHost = makeFakeClient(90 + requestedMaxPlayers, 30907);
+        sizeHost.accountId_ = 90 + requestedMaxPlayers;
+        sizeHost.nickname_ = `Size${teamSize}`;
+        sizeHost.username_ = `Size${teamSize}`;
+        rooms.registerLobbyClientSource([sizeHost]);
+        const sizeBody = makeCreateBody(`Size ${teamSize}`);
+        sizeBody[0] = 2;
+        sizeBody[1] = requestedMaxPlayers;
+        sizeBody.writeUInt16LE(3, 12);
+        const sizeTimers = installFakeTimers();
+        try {
+            assert.strictEqual(gate.dispatch(sizeHost, CQ_CREATE, sizeBody), true, `${teamSize}v${teamSize} PvP room creation must be handled`);
+            const sizeRoom = rooms.getRoom(sizeHost.createdRoomIndex_);
+            assert.strictEqual(sizeRoom.maxPlayers, teamSize * 2, `${teamSize}v${teamSize} PvP room must allow ${teamSize * 2} players`);
+            assert.strictEqual(sizeRoom.maxPlayersWire, teamSize - 1, `${teamSize}v${teamSize} room must send its normalized size value`);
+        } finally {
+            sizeTimers.restore();
+            resetRooms();
+        }
+    }
+
     console.log('[room-join test] ALL CHECKS PASS');
     process.exit(0);
 }
 
-main();
+main().catch((err) => { console.error(err); process.exit(1); });

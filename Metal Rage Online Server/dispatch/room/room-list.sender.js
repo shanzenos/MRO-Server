@@ -47,7 +47,10 @@ function buildRoomListEntry(room, updateType) {
     }
     buf.writeUInt16LE(FULL_FIELD_MASK, off); off += 2;
 
-    buf.writeUInt8((ROOM_TYPE_NORM_TO_RAW[room.roomType] ?? 0) & 0xFF, off); off += 1;
+    const rawRoomType = !room.isTrueCampaign && Number(room.rawRoomType) === 2
+        ? 2
+        : (ROOM_TYPE_NORM_TO_RAW[room.roomType] ?? 0);
+    buf.writeUInt8(rawRoomType & 0xFF, off); off += 1;
     buf.writeUInt8(room.state === 'playing' ? 1 : 0, off); off += 1;
     buf.writeUInt8(0, off); off += 1;
 
