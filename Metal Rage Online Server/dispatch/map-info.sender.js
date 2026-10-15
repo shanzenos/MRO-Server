@@ -8,7 +8,7 @@ const SN_MAP_INFO = 0x210115;
 
 function resolveRealMapIds() {
 
-    return MAP_INFO_REAL_IDS;
+    return [...MAP_INFO_REAL_IDS, ...MAP_IDS_PVP];
 }
 
 function sendMapInfoSN(client, mapIds) {

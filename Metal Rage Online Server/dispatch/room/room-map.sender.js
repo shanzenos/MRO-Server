@@ -90,18 +90,20 @@ function sendMapChangeAllPacket(client, mapList, effectiveSelectedIdx, campaignM
 
 function sendRoomMapPackets(client, ctx, getExactMessageBuffer, options = {}) {
 
-    if (!ctx.isTrueCampaign) {
+    if (!ctx.isTrueCampaign && !ctx.isPvpRoom) {
         return;
     }
 
     const {
         campaignMapCacheKey,
         campaignMapHints,
+        pvpMapHints,
         roomDefaultEntryHints,
     } = ctx;
 
-    const mapList = (campaignMapHints && campaignMapHints.length > 0)
-        ? campaignMapHints
+    const selectedMapHints = ctx.isPvpRoom ? pvpMapHints : campaignMapHints;
+    const mapList = (selectedMapHints && selectedMapHints.length > 0)
+        ? selectedMapHints
         : (roomDefaultEntryHints || []);
     const count = mapList.length;
     if (count === 0) return;
@@ -110,12 +112,12 @@ function sendRoomMapPackets(client, ctx, getExactMessageBuffer, options = {}) {
     const effectiveSelectedIdx = selectedIdx >= 0 ? selectedIdx : 0;
     const sendSupplementalAll = false;
 
-    const allMapList = isMapAllSingleEntryEnabled()
-        ? [mapList[effectiveSelectedIdx]]
-        : mapList;
-    const allEffectiveSelectedIdx = isMapAllSingleEntryEnabled()
-        ? 0
-        : effectiveSelectedIdx;
+    const allMapList = ctx.isPvpRoom
+        ? mapList
+        : (isMapAllSingleEntryEnabled() ? [mapList[effectiveSelectedIdx]] : mapList);
+    const allEffectiveSelectedIdx = ctx.isPvpRoom
+        ? effectiveSelectedIdx
+        : (isMapAllSingleEntryEnabled() ? 0 : effectiveSelectedIdx);
 
     sendMapChangeAllPacket(
         client, allMapList, allEffectiveSelectedIdx, campaignMapCacheKey,
