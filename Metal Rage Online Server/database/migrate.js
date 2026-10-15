@@ -16,6 +16,9 @@ async function migrate(pool)
                 await conn.query(`ALTER TABLE accounts ADD COLUMN ${name} INT UNSIGNED NOT NULL DEFAULT ${value}`);
             }
         }
+        if (columns.some(column => column.name === 'password_hash')) {
+            await conn.query('ALTER TABLE accounts DROP COLUMN password_hash');
+        }
         await conn.query(schema.match(/CREATE TABLE IF NOT EXISTS item_equips \([\s\S]*?;/)[0]);
         await conn.query('CREATE TABLE IF NOT EXISTS schema_migrations (id VARCHAR(64) PRIMARY KEY) ENGINE=InnoDB');
         const [completed] = await conn.execute('SELECT id FROM schema_migrations WHERE id = ?', ['equipment-v1']);
