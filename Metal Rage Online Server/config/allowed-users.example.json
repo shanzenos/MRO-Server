@@ -1,5 +1,5 @@
 {
     "users": [
-        { "name": "Player", "ip": "127.0.0.1", "hostAddress": "127.0.0.1" }
+        { "name": "Player", "ip": "127.0.0.1" }
     ]
 }

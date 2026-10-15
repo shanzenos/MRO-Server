@@ -10,8 +10,8 @@ const whitelistPath = require.resolve('../config/whitelist');
 const configPath = path.resolve(__dirname, '../config/allowed-users.json');
 const configuredUsers = {
     users: [
-        { name: 'Alice', ip: '203.0.113.5', hostAddress: '198.51.100.8' },
-        { name: 'Bob', hostAddress: '192.168.1.20' },
+        { name: 'Alice', ip: '203.0.113.5' },
+        { name: 'Bob', ip: '192.168.1.20' },
     ],
 };
 const settings = { whitelistEnabled: false };
@@ -48,7 +48,7 @@ try {
     assert.strictEqual(whitelist.isAllowed('alice', '::ffff:203.0.113.5'), true);
     assert.strictEqual(whitelist.isAllowed('Alice', '203.0.113.6'), false);
     assert.strictEqual(whitelist.isAllowed('Unlisted', '203.0.113.5'), false);
-    assert.strictEqual(whitelist.getHostAddress('Alice', '203.0.113.5'), '198.51.100.8');
+    assert.strictEqual(whitelist.getHostAddress('Alice', '203.0.113.5'), '203.0.113.5');
     assert.strictEqual(whitelist.getHostAddress('Bob', '192.168.1.20'), '192.168.1.20');
     assert.ok(configReads > 0, 'enabled whitelist must read the allow-users file');
 
