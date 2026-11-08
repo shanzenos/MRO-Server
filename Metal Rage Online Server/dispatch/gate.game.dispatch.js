@@ -271,6 +271,12 @@ function getGameInfoRound(client)
     return Number(client.playRound_) || 0;
 }
 
+function getGameInfoGoal(client)
+{
+    const goal = Number(client.mapChangeOneGoal_ ?? client.mapChangeOneKill_ ?? 0);
+    return Number.isFinite(goal) ? Math.min(Math.max(goal, 0), 0xFFFF) : 0;
+}
+
 function sendGameInfoSn(client, tag)
 {
     const BODY_SIZE = 0x1A;
@@ -294,7 +300,7 @@ function sendGameInfoSn(client, tag)
             timeLimitSource = 'create';
         }
     }
-    const goalScore = 0;
+    const goalScore = getGameInfoGoal(client);
 
     body.writeUInt32LE(battleIndex, 0x00);
     body.writeUInt16LE(redTeamIndex, 0x04);
@@ -354,8 +360,9 @@ function sendGameInfoSnToClient(room, client, tag)
     body.writeUInt16LE(Number(room.mapId || MAP_ID_DEFAULT_CAMPAIGN) & 0xFFFF, 0x11);
     body.writeUInt16LE(Number(room.playTime) || 10, 0x13);
     body.writeUInt8((Number(room.playRound) || 0) & 0xFF, 0x15);
-    body.writeUInt16LE(0, 0x16);
-    body.writeUInt16LE(0, 0x18);
+    const goalScore = Number(room.mapChangeOneGoal ?? room.mapChangeOneKill ?? 0) & 0xFFFF;
+    body.writeUInt16LE(goalScore, 0x16);
+    body.writeUInt16LE(goalScore, 0x18);
     client.send(msg);
     console.log(`[ZGateGameDispatch] >> Sent Game_Info_SN 0x00222111 to account=${client.accountIndex_ || client.accountId_} [${tag}]`);
 }
@@ -449,7 +456,7 @@ function sendGameInfoSnRoomBroadcast(room, tag)
         timeLimitSource = 'room';
     }
     const playRound = Number(room.playRound) || 0;
-    const goalScore = 0;
+    const goalScore = Number(room.mapChangeOneGoal ?? room.mapChangeOneKill ?? 0) & 0xFFFF;
 
     rooms.sendAll(room.id, () => {
         const [msg, body] = getExactMessageBuffer(0x00222111, BODY_SIZE);

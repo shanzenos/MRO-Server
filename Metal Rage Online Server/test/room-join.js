@@ -711,6 +711,9 @@ async function main()
     const gameInfoPacket = pvpHost._sent.find((s) => s.op === '0x00222111');
     assert.ok(gameInfoPacket, 'host must receive game-info roster state');
     assert.strictEqual(Buffer.from(gameInfoPacket.hex, 'hex').readUInt16LE(0x0F), 2, 'game-info roster count must match the two current room members');
+    assert.strictEqual(Buffer.from(gameInfoPacket.hex, 'hex').readUInt16LE(0x13), 7, 'game-info time limit must match the room setting');
+    assert.strictEqual(Buffer.from(gameInfoPacket.hex, 'hex').readUInt16LE(0x16), 5, 'game-info red goal must match the room setting');
+    assert.strictEqual(Buffer.from(gameInfoPacket.hex, 'hex').readUInt16LE(0x18), 5, 'game-info blue goal must match the room setting');
     const gameUserPackets = pvpHost._sent.filter((s) => s.op === '0x00222112');
     assert.strictEqual(gameUserPackets.length, 2, 'host must receive both in-game user records');
     const joinerGameUser = gameUserPackets.find((s) => Buffer.from(s.hex, 'hex').readUInt16LE(0x02) === 82);
@@ -739,6 +742,7 @@ async function main()
     deathPacket = pvpJoiner._sent.find((s) => s.op === '0x00230124');
     assert.strictEqual(Buffer.from(deathPacket.hex, 'hex').readUInt16LE(0x06), 1, 'red team score must be retained');
     assert.strictEqual(Buffer.from(deathPacket.hex, 'hex').readUInt16LE(0x08), 1, 'blue team kill score must increment');
+    assert.ok(deathPacket, 'PvP kills must use the client-supported Death_SN score fields');
 
     const deniedJoiner = makeFakeClient(84, 30907);
     deniedJoiner.accountId_ = 84;
