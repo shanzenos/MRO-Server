@@ -57,6 +57,7 @@ function createRoom({
         },
         members: new Map(),
         state: 'lobby',
+        teamScores: [0, 0],
     };
     rooms.set(id, room);
     return room;
