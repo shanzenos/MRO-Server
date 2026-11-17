@@ -18,7 +18,7 @@ Server uses the following ports:
 Requirements: 
 * [MySQL](https://www.mysql.com/)
 * [NodeJS](https://nodejs.org/en)
-* [Game Client][(https://archive.org/download/metal-rage-online-client/MetalRage%20Online/MetalRage%20Online.rar)](https://archive.org/download/metal-rage-online-client/MetalRage%20Online/)
+* [Game Client](https://archive.org/download/metal-rage-online-client/MetalRage%20Online/MetalRage%20Online.rar)](https://archive.org/download/metal-rage-online-client/MetalRage%20Online/)
 
 Additionally, a fix for the game to run on windows 11 onward can be found [here](https://github.com/shanzenos/Metal-Rage-Online-Win11-Fix)
 
