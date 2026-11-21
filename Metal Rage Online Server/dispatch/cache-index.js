@@ -20,7 +20,7 @@ function loadCacheIndexByItemId() {
     const girPositionByItemId = {};
     try {
 
-        const cachePath = require('../config/cache').findCacheBinPath();
+        const cachePath = require('../config/gamefiles').findCacheBinPath();
         const bytes = fs.readFileSync(cachePath);
         const headerSize = 82;
         const entrySize = 103;

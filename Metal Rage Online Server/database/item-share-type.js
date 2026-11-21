@@ -12,7 +12,7 @@ const USE_TIME_OFFSET = 0x43;
 let shareTypeByItemId = null;
 let useTimeByItemId = null;
 
-const { findCacheBinPath } = require('../config/cache');
+const { findCacheBinPath } = require('../config/gamefiles');
 
 function loadTables()
 {

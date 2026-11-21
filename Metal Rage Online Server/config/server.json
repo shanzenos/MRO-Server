@@ -1,6 +1,5 @@
 {
     "publicHost": "127.0.0.1",
-    "cachePath": "../Metal Rage Server/static/gamefiles",
     "startingCredits": 100000,
     "grantAllItemsAndMaxCredits": false,
     "whitelistEnabled": false
