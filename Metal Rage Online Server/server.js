@@ -3,6 +3,7 @@ const { createServer } = require('net');
 const db = require('./database/db');
 const rooms = require('./rooms');
 const { leaveRoomAndNotify } = require('./dispatch/room/room-leave');
+const { checkGameFiles, GameFilesError } = require('./config/gamefiles');
 
 const SERVER_PORT = 9211;
 const GAME_PORT = 30907;
@@ -68,6 +69,7 @@ class DispatchServer
 
 async function start()
 {
+    checkGameFiles();
     require('./config/server').load();
     require('./config/whitelist').initialize();
     await db.verifyConnection();
@@ -81,7 +83,15 @@ async function start()
 if (require.main === module) {
     start().catch(err => {
         console.error('[Server] Startup failed:', err.message);
-        db.pool.end().finally(() => { process.exitCode = 1; });
+        process.exitCode = 1;
+        db.pool.end().catch(closeErr => {
+            console.error('[Server] Database cleanup failed:', closeErr.message);
+        }).finally(() => {
+            if (err instanceof GameFilesError && process.stdin.isTTY && process.env.MRO_BATCH_LAUNCH !== '1') {
+                const readline = require('readline').createInterface({ input: process.stdin, output: process.stdout });
+                readline.question('Press Enter to close the server...', () => readline.close());
+            }
+        });
     });
 }
 

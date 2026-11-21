@@ -1,4 +1,5 @@
 @echo off
+setlocal
 title Metal Rage Server
 
 :: Set SERVER_DIR to the folder where this batch file is located
@@ -45,5 +46,8 @@ if not exist "node_modules" (
     echo.
 )
 
+set "MRO_BATCH_LAUNCH=1"
 node server.js
+set "SERVER_EXIT_CODE=%ERRORLEVEL%"
 pause
+exit /b %SERVER_EXIT_CODE%
